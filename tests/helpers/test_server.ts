@@ -7,6 +7,7 @@ import { UserServiceError } from "../../src/domain/errors/user_service_error.js"
 import type {
   DirectoryUser,
   NewDirectoryUser,
+  UserAccess,
   UserDirectory,
 } from "../../src/domain/ports/user_directory.js";
 
@@ -35,6 +36,7 @@ export const JWT_OPTIONS = {
   issuer: "auth-service",
   audience: "ms-api",
   accessTokenTtlSeconds: 900,
+  clientTokenTtlSeconds: 600,
 };
 
 export const TEST_PASSWORD = "Password@123";
@@ -43,6 +45,7 @@ export const WEB_DEVICE = { deviceName: "Test browser", deviceType: "WEB" };
 
 export class FakeUserDirectory implements UserDirectory {
   readonly users = new Map<string, DirectoryUser>();
+  readonly permissions = new Map<string, string[]>();
   unavailable = false;
 
   add(data: Partial<DirectoryUser> & { email: string }): DirectoryUser {
@@ -71,6 +74,18 @@ export class FakeUserDirectory implements UserDirectory {
   async findById(id: string): Promise<DirectoryUser | null> {
     this.guard();
     return this.users.get(id) ?? null;
+  }
+
+  grant(id: string, permissions: string[]): void {
+    this.permissions.set(id, permissions);
+  }
+
+  async getAccess(id: string): Promise<UserAccess | null> {
+    this.guard();
+    const user = this.users.get(id);
+    return user
+      ? { status: user.status, permissions: this.permissions.get(id) ?? [] }
+      : null;
   }
 
   async findByEmail(email: string): Promise<DirectoryUser | null> {

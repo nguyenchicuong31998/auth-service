@@ -14,6 +14,7 @@
     "keys:generate": "node --env-file-if-exists=.env --import tsx src/generate_keys.ts",
     "seed": "node --env-file=.env --import tsx src/seed.ts",
     "seed:prod": "node --env-file=.env dist/seed.js",
+    "oauth-client:create": "node --env-file=.env --import tsx src/create_oauth_client.ts",
     "test": "node --env-file=.env --import tsx --test --test-concurrency=1 \"tests/**/*.test.ts\"",
     "typecheck": "tsc",
     "lint": "eslint .",

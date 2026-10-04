@@ -7,6 +7,11 @@ export interface DirectoryUser {
   status: string;
 }
 
+export interface UserAccess {
+  status: string;
+  permissions: string[];
+}
+
 export interface NewDirectoryUser {
   fullName: string;
   email: string;
@@ -16,4 +21,5 @@ export interface UserDirectory {
   register(data: NewDirectoryUser): Promise<DirectoryUser>;
   findById(id: Uuid): Promise<DirectoryUser | null>;
   findByEmail(email: string): Promise<DirectoryUser | null>;
+  getAccess(id: Uuid): Promise<UserAccess | null>;
 }

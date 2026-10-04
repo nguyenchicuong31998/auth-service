@@ -139,6 +139,29 @@ Session **đang hoạt động** = `revokedAt = null` và `expiredAt > now`. Ses
 | `account_disabled` | Lúc refresh, user không còn `active`/`pending` |
 | `refresh_token_reused` | Một refresh token đã dùng bị gửi lại (nghi bị đánh cắp) |
 
+### 3.4 `oauth_clients`
+
+Credential **server-to-server** (OAuth2 client credentials). Không phải đăng nhập Google/Facebook/Apple
+(những cái đó đi qua `user_identities`).
+
+| Cột | Kiểu | Mô tả |
+|---|---|---|
+| `id` | UUID | PK |
+| `ownerUserId` | UUID | → `users.id` – user tạo client |
+| `name` | VARCHAR(255) | |
+| `clientId` | VARCHAR(64) | Unique, công khai, dạng `cli_…` |
+| `clientSecretHash` | VARCHAR(255) | SHA-256 của secret. Secret gốc chỉ trả **đúng 1 lần** (lúc tạo / đổi secret) |
+| `status` | VARCHAR(20) | `active`, `inactive` (tạm khoá), `revoked` (vĩnh viễn, không mở lại được) |
+| `scopes` | ARRAY | Permission code client được xin, ví dụ `user:read` (ít nhất 1) |
+| `createdAt` / `updatedAt` / `deletedAt` | TIMESTAMP | Soft delete (xoá = đồng thời `revoked`) |
+
+Index: `clientId` unique · `(ownerUserId, deletedAt)` · `(deletedAt, createdAt)`.
+
+Quy tắc chống leo thang quyền:
+- Tạo / sửa: chỉ gán được scope mà **người gọi đang có**.
+- Mỗi lần cấp token: scope thực tế = `scopes` của client **∩ quyền hiện tại của chủ client**.
+  Chủ bị gỡ quyền → client mất quyền đó ngay; chủ bị chặn / xoá → `invalid_client`.
+
 ## 4. Refresh token
 
 - Dạng `<sessionId>.<secret>`; `secret` = 32 byte ngẫu nhiên (base64url). DB chỉ lưu `SHA-256(secret)`.

@@ -56,13 +56,16 @@ async function call(
   expected: number,
   options: {
     id?: string;
+    query?: string;
     body?: unknown;
     raw?: string;
     token?: string;
     headers?: Record<string, string>;
   } = {},
 ): Promise<Json> {
-  const path = template.replace("{id}", options.id ?? "");
+  const path =
+    template.replace("{id}", options.id ?? "") +
+    (options.query ? `?${options.query}` : "");
   const res = await server.api(method.toUpperCase(), path, options);
   const label = `${method.toUpperCase()} ${template} -> ${res.status}`;
   assert.equal(res.status, expected, `${label} ${JSON.stringify(res.body)}`);
@@ -361,6 +364,113 @@ describe("every documented response is real", () => {
         device: { ...WEB_DEVICE, id: again.deviceId },
       },
     });
+  });
+
+  it("oauth clients and the token endpoint", async () => {
+    const admin = await server.register("oauth-admin@example.com");
+    server.users.grant(admin.id, [
+      "oauth-client:create",
+      "oauth-client:read",
+      "oauth-client:update",
+      "oauth-client:delete",
+      "user:read",
+    ]);
+    const token = (await loginAs("oauth-admin@example.com")).accessToken;
+    await server.register("no-perm@example.com");
+    const noPerm = (await loginAs("no-perm@example.com")).accessToken;
+    const missing = randomUUID();
+    const whileDown = async (fn: () => Promise<unknown>) => {
+      server.users.unavailable = true;
+      try {
+        await fn();
+      } finally {
+        server.users.unavailable = false;
+      }
+    };
+
+    const list = "/api/oauth-clients";
+    const one = "/api/oauth-clients/{id}";
+    const secret = "/api/oauth-clients/{id}/secret";
+    const body = { name: "contract-client", scopes: ["user:read"] };
+
+    const client = await call("post", list, 201, { token, body });
+    await call("post", list, 400, { token, body: { name: "x" } });
+    await call("post", list, 401, { body });
+    await call("post", list, 403, {
+      token,
+      body: { name: "x", scopes: ["user:delete"] },
+    });
+    await whileDown(() => call("post", list, 503, { token, body }));
+
+    await call("get", list, 200, { token });
+    await call("get", list, 400, { token, query: "status=bad" });
+    await call("get", list, 401);
+    await call("get", list, 403, { token: noPerm });
+    await whileDown(() => call("get", list, 503, { token }));
+
+    await call("get", one, 200, { id: client.id, token });
+    await call("get", one, 400, { id: "abc", token });
+    await call("get", one, 401, { id: client.id });
+    await call("get", one, 403, { id: client.id, token: noPerm });
+    await call("get", one, 404, { id: missing, token });
+    await whileDown(() => call("get", one, 503, { id: client.id, token }));
+
+    const tokenBody = {
+      grant_type: "client_credentials",
+      client_id: client.clientId,
+      client_secret: client.clientSecret,
+    };
+    await call("post", "/oauth/token", 200, { body: tokenBody });
+    await call("post", "/oauth/token", 400, { body: {} });
+    await call("post", "/oauth/token", 401, {
+      body: { ...tokenBody, client_secret: "wrong" },
+    });
+    await whileDown(() =>
+      call("post", "/oauth/token", 503, { body: tokenBody }),
+    );
+
+    await call("patch", one, 200, {
+      id: client.id,
+      token,
+      body: { name: "renamed" },
+    });
+    await call("patch", one, 400, { id: client.id, token, body: {} });
+    await call("patch", one, 401, { id: client.id, body: { name: "x" } });
+    await call("patch", one, 403, {
+      id: client.id,
+      token: noPerm,
+      body: { name: "x" },
+    });
+    await call("patch", one, 404, { id: missing, token, body: { name: "x" } });
+    await whileDown(() =>
+      call("patch", one, 503, { id: client.id, token, body: { name: "x" } }),
+    );
+
+    await call("post", secret, 200, { id: client.id, token });
+    await call("post", secret, 400, { id: "abc", token });
+    await call("post", secret, 401, { id: client.id });
+    await call("post", secret, 403, { id: client.id, token: noPerm });
+    await call("post", secret, 404, { id: missing, token });
+    await whileDown(() => call("post", secret, 503, { id: client.id, token }));
+
+    await call("patch", one, 200, {
+      id: client.id,
+      token,
+      body: { status: "revoked" },
+    });
+    await call("patch", one, 409, {
+      id: client.id,
+      token,
+      body: { status: "active" },
+    });
+    await call("post", secret, 409, { id: client.id, token });
+
+    await call("delete", one, 400, { id: "abc", token });
+    await call("delete", one, 401, { id: client.id });
+    await call("delete", one, 403, { id: client.id, token: noPerm });
+    await whileDown(() => call("delete", one, 503, { id: client.id, token }));
+    await call("delete", one, 204, { id: client.id, token });
+    await call("delete", one, 404, { id: client.id, token });
   });
 
   it("413 and 415 on every endpoint with a body", async () => {

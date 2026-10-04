@@ -38,6 +38,16 @@ Seed mật khẩu cho super admin (**chỉ chạy một lần**, chạy lại v�
 - JWKS (public key cho service khác): `http://localhost:8081/.well-known/jwks.json`
 - Health: `http://localhost:8081/health`
 
+## Credential cho service khác (OAuth2 client credentials)
+
+```bash
+npm run oauth-client:create -- notification-service user:read
+# in ra OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET – secret chỉ hiện 1 lần, chép ngay vào .env của service đó
+```
+
+Service đó lấy token: `POST http://localhost:8081/oauth/token` với
+`grant_type=client_credentials&client_id=...&client_secret=...`.
+
 ## Thử nhanh
 
 ```bash

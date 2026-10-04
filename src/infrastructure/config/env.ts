@@ -38,6 +38,7 @@ export const env = {
     issuer: optional("JWT_ISSUER") ?? "auth-service",
     audience: optional("JWT_AUDIENCE") ?? "ms-api",
     accessTokenTtlSeconds: positiveInt("ACCESS_TOKEN_TTL_SECONDS", 900),
+    clientTokenTtlSeconds: positiveInt("CLIENT_TOKEN_TTL_SECONDS", 600),
   },
   refreshTokenTtlDays: positiveInt("REFRESH_TOKEN_TTL_DAYS", 30),
   bcryptRounds: positiveInt("BCRYPT_ROUNDS", 12),

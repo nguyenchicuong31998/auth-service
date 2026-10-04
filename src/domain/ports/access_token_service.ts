@@ -16,6 +16,10 @@ export interface JsonWebKeySet {
 
 export interface AccessTokenService {
   issue(claims: AccessTokenClaims): Promise<IssuedAccessToken>;
+  issueClientToken(
+    clientId: string,
+    scopes: string[],
+  ): Promise<IssuedAccessToken>;
   verify(token: string): Promise<AccessTokenClaims | null>;
   publicKeys(): JsonWebKeySet;
 }

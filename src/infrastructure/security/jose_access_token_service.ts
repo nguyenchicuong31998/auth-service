@@ -10,6 +10,7 @@ import { JWT_ALGORITHM, JwtSigner, type JwtIdentity } from "./jwt_signer.js";
 
 export interface JwtOptions extends JwtIdentity {
   accessTokenTtlSeconds: number;
+  clientTokenTtlSeconds: number;
 }
 
 export class JoseAccessTokenService implements AccessTokenService {
@@ -30,6 +31,19 @@ export class JoseAccessTokenService implements AccessTokenService {
     const token = await this.signer.sign(
       userId,
       { kind: "user", sid: sessionId },
+      ttl,
+    );
+    return { token, expiresIn: ttl };
+  }
+
+  async issueClientToken(
+    clientId: string,
+    scopes: string[],
+  ): Promise<IssuedAccessToken> {
+    const ttl = this.options.clientTokenTtlSeconds;
+    const token = await this.signer.sign(
+      clientId,
+      { kind: "service", scope: scopes.join(" ") },
       ttl,
     );
     return { token, expiresIn: ttl };

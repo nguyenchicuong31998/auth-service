@@ -1,3 +1,4 @@
+import { oauthPaths, oauthSchemas, oauthTags } from "./oauth_docs.js";
 import { DEVICE_TYPES } from "../../domain/entities/user_device.js";
 import {
   errorResponse,
@@ -118,6 +119,7 @@ export const openApiSpec = {
     { name: "Sessions", description: "Phiên đăng nhập của user hiện tại" },
     { name: "Devices", description: "Thiết bị đã đăng nhập của user hiện tại" },
     { name: "Keys", description: "Public key để kiểm tra JWT" },
+    ...oauthTags,
     { name: "Health" },
   ],
   components: {
@@ -125,6 +127,7 @@ export const openApiSpec = {
       bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
     },
     schemas: {
+      ...oauthSchemas,
       Error: {
         type: "object",
         required: ["message"],
@@ -308,6 +311,7 @@ export const openApiSpec = {
     },
   },
   paths: {
+    ...oauthPaths,
     "/health": {
       get: {
         tags: ["Health"],

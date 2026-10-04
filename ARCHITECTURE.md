@@ -115,6 +115,21 @@ auth-service/
 Service khác (user-service) chỉ kiểm tra JWT bằng JWKS, không hỏi auth-service ở mỗi request ⇒ sau logout,
 access token còn dùng được ở service khác tối đa `ACCESS_TOKEN_TTL_SECONDS` (15 phút). Đây là đánh đổi chuẩn của JWT.
 
+### 4.1 OAuth client credentials (server-to-server)
+
+```
+admin (oauth-client:create) ── POST /api/oauth-clients ──▶ { clientId, clientSecret (1 lần) }
+service ── POST /oauth/token (client_credentials) ──▶ JWT kind=service, sub=clientId, scope, 10'
+service ── Authorization: Bearer ──▶ user-service / service khác (kiểm tra scope)
+```
+
+- Tạo client cho service nội bộ lúc setup: `npm run oauth-client:create -- <name> <scope...>`
+  (chủ = `SUPER_ADMIN_EMAIL`), ví dụ `npm run oauth-client:create -- notification-service user:read`.
+- `/oauth/token` theo RFC 6749 §4.4: body form-urlencoded hoặc JSON, hoặc `Authorization: Basic`;
+  lỗi dạng `{ error, error_description }`; luôn `Cache-Control: no-store`.
+- API quản trị `/api/oauth-clients` cần permission `oauth-client:*`. auth-service hỏi quyền của user qua
+  `GET /api/users/{id}/effective-permissions` (token service, scope `user:read`).
+
 ## 5. Lỗi & HTTP status
 
 | Nguồn | Status |
@@ -139,6 +154,7 @@ access token còn dùng được ở service khác tối đa `ACCESS_TOKEN_TTL_S
 | `JWT_PRIVATE_KEY_PATH` | `keys/private.pem` | Khoá RSA ký JWT |
 | `JWT_ISSUER` / `JWT_AUDIENCE` | `auth-service` / `ms-api` | Service kiểm tra token phải dùng cùng giá trị |
 | `ACCESS_TOKEN_TTL_SECONDS` | `900` | |
+| `CLIENT_TOKEN_TTL_SECONDS` | `600` | Token cấp cho OAuth client |
 | `REFRESH_TOKEN_TTL_DAYS` | `30` | |
 | `BCRYPT_ROUNDS` | `12` | |
 | `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD` | – | Chỉ dùng cho `npm run seed` |

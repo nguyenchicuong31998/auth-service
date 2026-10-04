@@ -4,6 +4,7 @@ import { UserServiceError } from "../../domain/errors/user_service_error.js";
 import type {
   DirectoryUser,
   NewDirectoryUser,
+  UserAccess,
   UserDirectory,
 } from "../../domain/ports/user_directory.js";
 import type { ServiceTokenProvider } from "../security/service_token_provider.js";
@@ -51,6 +52,22 @@ export class UserServiceClient implements UserDirectory {
     const res = await this.request("GET", `/api/users?${query}`);
     const page = (await this.json(res)) as { items: unknown[] };
     return page.items[0] ? toDirectoryUser(page.items[0]) : null;
+  }
+
+  async getAccess(id: Uuid): Promise<UserAccess | null> {
+    const res = await this.request(
+      "GET",
+      `/api/users/${encodeURIComponent(id)}/effective-permissions`,
+    );
+    if (res.status === 404) return null;
+    const body = (await this.json(res)) as {
+      status: string;
+      permissions: { code: string }[];
+    };
+    return {
+      status: body.status,
+      permissions: body.permissions.map(({ code }) => code),
+    };
   }
 
   private async request(

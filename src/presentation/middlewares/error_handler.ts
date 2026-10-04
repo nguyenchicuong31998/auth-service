@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { AppError } from "../../application/errors/app_error.js";
+import { OAuthError } from "../../application/errors/oauth_error.js";
 import { DuplicateKeyError } from "../../domain/errors/duplicate_key_error.js";
 import { UserServiceError } from "../../domain/errors/user_service_error.js";
 
@@ -54,6 +55,15 @@ export function errorHandler(
   res: Response,
   _next: NextFunction,
 ): void {
+  if (err instanceof OAuthError) {
+    if (err.status === 401) {
+      res.setHeader("WWW-Authenticate", 'Basic realm="oauth"');
+    }
+    res
+      .status(err.status)
+      .json({ error: err.error, error_description: err.description });
+    return;
+  }
   const appError = toAppError(err);
   if (!appError) {
     console.error(err);

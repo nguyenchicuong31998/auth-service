@@ -25,6 +25,15 @@ import { createAuthRoutes } from "./presentation/routes/auth_routes.js";
 import { createJwksRoutes } from "./presentation/routes/jwks_routes.js";
 import { createSessionRoutes } from "./presentation/routes/session_routes.js";
 import { createUserDeviceRoutes } from "./presentation/routes/user_device_routes.js";
+import { OAuthClientService } from "./application/services/oauth_client_service.js";
+import { OAuthTokenService } from "./application/services/oauth_token_service.js";
+import { PermissionGuard } from "./application/shared/permission_guard.js";
+import { MongooseOAuthClientRepository } from "./infrastructure/database/mongodb/repositories/mongoose_oauth_client_repository.js";
+import { OAuthClientController } from "./presentation/controllers/oauth_client_controller.js";
+import { OAuthTokenController } from "./presentation/controllers/oauth_token_controller.js";
+import { createAuthorize } from "./presentation/middlewares/authorize.js";
+import { createOAuthClientRoutes } from "./presentation/routes/oauth_client_routes.js";
+import { createOAuthTokenRoutes } from "./presentation/routes/oauth_token_routes.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -66,13 +75,14 @@ function createRepositories() {
     identities: new MongooseUserIdentityRepository(),
     devices: new MongooseUserDeviceRepository(),
     sessions: new MongooseSessionRepository(),
+    oauthClients: new MongooseOAuthClientRepository(),
   };
 }
 
 export function createRoutes(
   external: ExternalServices = createExternalServices(),
 ): ApiRoute[] {
-  const { identities, devices, sessions } = createRepositories();
+  const { identities, devices, sessions, oauthClients } = createRepositories();
   const { userDirectory, passwordHasher, accessTokens } = external;
 
   const authService = new AuthService(
@@ -87,6 +97,17 @@ export function createRoutes(
   const sessionService = new SessionService(sessions, devices);
   const userDeviceService = new UserDeviceService(devices, sessions);
   const authenticate = createAuthenticate(authService);
+  const permissionGuard = new PermissionGuard(userDirectory);
+  const authorize = createAuthorize(permissionGuard);
+  const oauthClientService = new OAuthClientService(
+    oauthClients,
+    permissionGuard,
+  );
+  const oauthTokenService = new OAuthTokenService(
+    oauthClients,
+    userDirectory,
+    accessTokens,
+  );
 
   return [
     {
@@ -108,6 +129,20 @@ export function createRoutes(
       ),
     },
     {
+      path: "/api/oauth-clients",
+      router: createOAuthClientRoutes(
+        new OAuthClientController(oauthClientService),
+        authenticate,
+        authorize,
+      ),
+    },
+    {
+      path: "/oauth",
+      router: createOAuthTokenRoutes(
+        new OAuthTokenController(oauthTokenService),
+      ),
+    },
+    {
       path: "/.well-known",
       router: createJwksRoutes(new JwksController(accessTokens)),
     },
@@ -126,4 +161,17 @@ export function createSeeder(
     external.userDirectory,
     external.passwordHasher,
   );
+}
+
+export function createOAuthClientAdmin(
+  userDirectory: UserDirectory = createUserDirectory(loadSigningKey()),
+): { clients: OAuthClientService; users: UserDirectory } {
+  const { oauthClients } = createRepositories();
+  return {
+    clients: new OAuthClientService(
+      oauthClients,
+      new PermissionGuard(userDirectory),
+    ),
+    users: userDirectory,
+  };
 }
