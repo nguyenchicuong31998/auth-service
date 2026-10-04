@@ -1,0 +1,142 @@
+# ARCHITECTURE – auth-service
+
+Tài liệu kiến trúc của **auth-service**. Đọc cùng [docs/ERD.md](docs/ERD.md) (dữ liệu) và Swagger tại `/docs` (API).
+Quy ước code giống hệt user-service.
+
+## 1. Vai trò trong hệ thống
+
+| Service | Sở hữu | Không làm |
+|---|---|---|
+| **auth-service** (cổng 8081) | Cách đăng nhập (`user_identities`), thiết bị, session, ký JWT | Không lưu hồ sơ user, role, permission |
+| **user-service** (cổng 8080) | Hồ sơ user, role, permission | Không lưu mật khẩu, không cấp token |
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as auth-service
+    participant U as user-service
+    C->>A: POST /api/auth/login (email, password, device)
+    A->>A: tìm user_identities (manual, email) + bcrypt.compare
+    A->>U: GET /api/users/{id} (kiểm tra status)
+    A->>A: tạo/ghi nhận user_devices, tạo sessions
+    A-->>C: accessToken (JWT RS256, 15') + refreshToken
+    C->>U: gọi API kèm Authorization: Bearer <accessToken>
+    U->>A: GET /.well-known/jwks.json (cache)
+    U->>U: tự kiểm tra chữ ký JWT bằng public key
+```
+
+Access token chỉ chứa định danh: `sub` = userId, `sid` = sessionId, `iss`, `aud`, `iat`, `exp`, `jti`.
+Quyền (role/permission) **không** nằm trong token: service nhận request tự tra quyền (user-service sở hữu dữ liệu quyền).
+
+## 2. Kiến trúc phân tầng (Clean Architecture)
+
+| Tầng | Được import | Không được import |
+|---|---|---|
+| `domain` | chỉ `domain` | express, mongoose, mọi tầng khác |
+| `application` | `domain` | `infrastructure`, `presentation`, express, mongoose |
+| `infrastructure` | `domain` | `application`, `presentation`, express |
+| `presentation` | `application`, `domain` | `infrastructure`, mongoose |
+| `container.ts`, `main.ts`, `seed.ts`, `generate_keys.ts` | tất cả | – |
+
+Quy tắc được **ESLint kiểm tra tự động** (`no-restricted-imports` trong `eslint.config.js`).
+
+Những thứ bên ngoài (bcrypt, JWT, user-service) được application dùng qua **port** – interface ở `domain/ports`:
+
+| Port | Bản cài đặt (infrastructure) | Bản giả trong test |
+|---|---|---|
+| `PasswordHasher` | `security/bcrypt_password_hasher.ts` (bcryptjs) | cùng class, cost 4 |
+| `AccessTokenService` | `security/jose_access_token_service.ts` (jose, RS256) | cùng class, khoá sinh trong bộ nhớ |
+| `UserDirectory` | `http/user_service_client.ts` (fetch, timeout 5s) | `FakeUserDirectory` (bộ nhớ) |
+
+## 3. Code map
+
+```
+auth-service/
+├─ README.md · ARCHITECTURE.md · docs/ERD.md
+├─ .env / .env.example                    cấu hình (mục 6)
+├─ keys/private.pem                       khoá ký JWT – sinh bằng `npm run keys:generate`, KHÔNG commit
+├─ src/
+│  ├─ main.ts                             entry `npm run dev/start`: nạp khoá → kết nối DB + index → HTTP
+│  ├─ seed.ts                             entry `npm run seed`: tạo đăng nhập mật khẩu cho SUPER_ADMIN
+│  ├─ generate_keys.ts                    entry `npm run keys:generate`: sinh khoá RSA 2048 (không ghi đè)
+│  ├─ container.ts                        composition root: createRoutes() · createSeeder()
+│  ├─ domain/
+│  │  ├─ entities/                        1 file = 1 bảng: user_identity · user_device · session (+ isSessionActive)
+│  │  ├─ repositories/                    interface lưu trữ, 1 file = 1 bảng
+│  │  ├─ ports/                           password_hasher · access_token_service · user_directory
+│  │  └─ errors/                          duplicate_key_error · user_service_error
+│  ├─ application/
+│  │  ├─ services/
+│  │  │  ├─ auth_service.ts               register · login · refresh · logout · logoutAll · changePassword · authenticate
+│  │  │  ├─ session_service.ts            list · revoke
+│  │  │  └─ user_device_service.ts        list · update (chặn thiết bị → thu hồi session)
+│  │  ├─ seeders/super_admin_seeder.ts    chỉ dùng cho `npm run seed`
+│  │  ├─ validators/                      common_validator · auth_validator · user_device_validator
+│  │  ├─ dtos/auth_dto.ts                 TokenPair, LoginResult, Session (dữ liệu trả ra không phải bảng)
+│  │  ├─ shared/token_hash.ts             sinh token ngẫu nhiên, SHA-256, so sánh an toàn thời gian
+│  │  └─ errors/app_error.ts              AppError 400/401/403/404/409
+│  ├─ infrastructure/
+│  │  ├─ config/env.ts
+│  │  ├─ database/mongodb/                connection · mongo_errors · models/ · repositories/mongoose_<bảng>_repository.ts
+│  │  ├─ security/                        bcrypt_password_hasher · jose_access_token_service · rsa_key_file
+│  │  └─ http/user_service_client.ts      gọi user-service
+│  └─ presentation/
+│     ├─ app.ts                           json, /health, /docs, routes, 404, error handler
+│     ├─ middlewares/                     authenticate (Bearer → kiểm tra JWT + session còn hiệu lực) · error_handler
+│     ├─ controllers/ · routes/           auth · session · user_device · jwks
+│     ├─ utils/request.ts                 IP/User-Agent, id param, auth context
+│     └─ docs/                            openapi_helpers · openapi_spec
+└─ tests/
+   ├─ helpers/test_server.ts              app trên DB *_test riêng + FakeUserDirectory + khoá RSA tạm
+   ├─ auth_api.test.ts                    e2e mọi luồng & trường hợp lỗi
+   └─ openapi_contract.test.ts            Swagger ↔ API thật (route, mọi status, schema response)
+```
+
+## 4. Các luồng chính
+
+| Luồng | Xử lý |
+|---|---|
+| Đăng ký | Kiểm tra email chưa có identity → băm mật khẩu → user-service tạo user (`pending`) → tạo identity `manual` |
+| Đăng nhập | Tìm identity → bcrypt (email không tồn tại vẫn chạy bcrypt giả để không lộ email qua thời gian phản hồi) → kiểm tra status user (`active`/`pending`) → thiết bị (dùng lại nếu `device.id` của chính user, chặn nếu `isActive = false`) → thu hồi session cũ của thiết bị → tạo session → cấp token |
+| Refresh | Tách `sessionId.secret` → session phải còn hiệu lực → hash khớp (không khớp = dùng lại → thu hồi) → thiết bị & user còn hợp lệ → xoay refresh token |
+| Gọi API cần đăng nhập | Middleware `authenticate`: kiểm tra chữ ký/iss/aud/exp **và** session chưa bị thu hồi → logout có hiệu lực ngay trong auth-service |
+| Đổi mật khẩu | Kiểm tra mật khẩu hiện tại → băm mới → thu hồi mọi session khác |
+
+Service khác (user-service) chỉ kiểm tra JWT bằng JWKS, không hỏi auth-service ở mỗi request ⇒ sau logout,
+access token còn dùng được ở service khác tối đa `ACCESS_TOKEN_TTL_SECONDS` (15 phút). Đây là đánh đổi chuẩn của JWT.
+
+## 5. Lỗi & HTTP status
+
+| Nguồn | Status |
+|---|---|
+| Validator | 400 |
+| Sai email/mật khẩu, token sai/hết hạn, session bị thu hồi | 401 (kèm `WWW-Authenticate: Bearer`) |
+| User `inactive`/`blocked`/`banned`, thiết bị bị chặn | 403 |
+| Không tìm thấy session/thiết bị (hoặc của user khác) | 404 |
+| Email đã tồn tại | 409 |
+| JSON lỗi · body quá 100KB · charset lạ | 400 · 413 · 415 |
+| user-service không phản hồi / lỗi | 503 |
+
+## 6. Cấu hình
+
+| Biến | Mặc định | Mô tả |
+|---|---|---|
+| `PORT` | `8081` | |
+| `MONGODB_URI` | – (bắt buộc) | |
+| `MONGODB_DB_NAME` | `auth_service` | |
+| `DNS_SERVERS` | – | DNS cho `mongodb+srv://` |
+| `USER_SERVICE_URL` | `http://localhost:8080` | |
+| `JWT_PRIVATE_KEY_PATH` | `keys/private.pem` | Khoá RSA ký JWT |
+| `JWT_ISSUER` / `JWT_AUDIENCE` | `auth-service` / `ms-api` | Service kiểm tra token phải dùng cùng giá trị |
+| `ACCESS_TOKEN_TTL_SECONDS` | `900` | |
+| `REFRESH_TOKEN_TTL_DAYS` | `30` | |
+| `BCRYPT_ROUNDS` | `12` | |
+| `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD` | – | Chỉ dùng cho `npm run seed` |
+
+## 7. Giới hạn hiện tại & hướng phát triển
+
+- Chỉ đăng nhập email/mật khẩu; `phone_otp`, Google, Facebook, Apple: schema đã sẵn, làm đợt sau.
+- Chưa có xác minh email, quên mật khẩu, giới hạn số lần đăng nhập sai (rate limit / khoá tạm).
+- Chưa có đồng bộ khi user bị xoá ở user-service (bước 4 – API nội bộ hoặc event).
+- Một khoá ký duy nhất; xoay khoá cần hỗ trợ nhiều khoá trong JWKS.
+- Sau reverse proxy cần bật `trust proxy` để lấy đúng IP client.
