@@ -34,6 +34,11 @@ import { OAuthTokenController } from "./presentation/controllers/oauth_token_con
 import { createAuthorize } from "./presentation/middlewares/authorize.js";
 import { createOAuthClientRoutes } from "./presentation/routes/oauth_client_routes.js";
 import { createOAuthTokenRoutes } from "./presentation/routes/oauth_token_routes.js";
+import { EmailVerificationService } from "./application/services/email_verification_service.js";
+import type { NotificationSender } from "./domain/ports/notification_sender.js";
+import { MongooseEmailVerificationTokenRepository } from "./infrastructure/database/mongodb/repositories/mongoose_email_verification_token_repository.js";
+import { NotificationClient } from "./infrastructure/http/notification_client.js";
+import { createRateLimits } from "./presentation/middlewares/rate_limit.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -41,23 +46,34 @@ export interface ExternalServices {
   userDirectory: UserDirectory;
   passwordHasher: PasswordHasher;
   accessTokens: AccessTokenService;
+  notifications: NotificationSender;
+}
+
+export interface RouteOptions {
+  rateLimit: boolean;
 }
 
 const SERVICE_NAME = "auth-service";
-const USER_SERVICE_SCOPES = ["user:create", "user:read"];
+const SERVICE_SCOPES = [
+  "user:create",
+  "user:read",
+  "user:verify",
+  "user:record-login",
+  "email:send",
+];
 
 const loadSigningKey = () => loadPrivateKey(env.jwt.privateKeyPath);
 
+const createServiceTokens = (signingKey: KeyObject) =>
+  new ServiceTokenProvider(signingKey, {
+    issuer: env.jwt.issuer,
+    audience: env.jwt.audience,
+    serviceName: SERVICE_NAME,
+    scopes: SERVICE_SCOPES,
+  });
+
 const createUserDirectory = (signingKey: KeyObject) =>
-  new UserServiceClient(
-    env.userServiceUrl,
-    new ServiceTokenProvider(signingKey, {
-      issuer: env.jwt.issuer,
-      audience: env.jwt.audience,
-      serviceName: SERVICE_NAME,
-      scopes: USER_SERVICE_SCOPES,
-    }),
-  );
+  new UserServiceClient(env.userServiceUrl, createServiceTokens(signingKey));
 
 const createPasswordHasher = () => new BcryptPasswordHasher(env.bcryptRounds);
 
@@ -67,6 +83,10 @@ function createExternalServices(): ExternalServices {
     userDirectory: createUserDirectory(signingKey),
     passwordHasher: createPasswordHasher(),
     accessTokens: new JoseAccessTokenService(signingKey, env.jwt),
+    notifications: new NotificationClient(
+      env.notificationServiceUrl,
+      createServiceTokens(signingKey),
+    ),
   };
 }
 
@@ -76,14 +96,30 @@ function createRepositories() {
     devices: new MongooseUserDeviceRepository(),
     sessions: new MongooseSessionRepository(),
     oauthClients: new MongooseOAuthClientRepository(),
+    verificationTokens: new MongooseEmailVerificationTokenRepository(),
   };
 }
 
 export function createRoutes(
   external: ExternalServices = createExternalServices(),
+  options: RouteOptions = { rateLimit: env.http.rateLimit },
 ): ApiRoute[] {
-  const { identities, devices, sessions, oauthClients } = createRepositories();
-  const { userDirectory, passwordHasher, accessTokens } = external;
+  const { identities, devices, sessions, oauthClients, verificationTokens } =
+    createRepositories();
+  const { userDirectory, passwordHasher, accessTokens, notifications } =
+    external;
+  const limits = createRateLimits(options.rateLimit);
+
+  const verificationService = new EmailVerificationService(
+    verificationTokens,
+    identities,
+    userDirectory,
+    notifications,
+    {
+      ttlMs: env.emailVerificationTtlHours * 60 * 60 * 1000,
+      verifyUrl: env.verifyEmailUrl,
+    },
+  );
 
   const authService = new AuthService(
     identities,
@@ -93,6 +129,7 @@ export function createRoutes(
     passwordHasher,
     accessTokens,
     env.refreshTokenTtlDays * DAY_MS,
+    verificationService,
   );
   const sessionService = new SessionService(sessions, devices);
   const userDeviceService = new UserDeviceService(devices, sessions);
@@ -112,7 +149,11 @@ export function createRoutes(
   return [
     {
       path: "/api/auth",
-      router: createAuthRoutes(new AuthController(authService), authenticate),
+      router: createAuthRoutes(
+        new AuthController(authService, verificationService),
+        authenticate,
+        limits,
+      ),
     },
     {
       path: "/api/auth/sessions",
@@ -140,6 +181,7 @@ export function createRoutes(
       path: "/oauth",
       router: createOAuthTokenRoutes(
         new OAuthTokenController(oauthTokenService),
+        limits,
       ),
     },
     {

@@ -1,4 +1,5 @@
 import type { Uuid } from "../../domain/entities/base_entity.js";
+import type { AuthProvider } from "../../domain/entities/user_identity.js";
 import { DuplicateKeyError } from "../../domain/errors/duplicate_key_error.js";
 import { UserServiceError } from "../../domain/errors/user_service_error.js";
 import type {
@@ -15,8 +16,20 @@ const unavailable = () =>
   new UserServiceError(503, "User service is unavailable");
 
 function toDirectoryUser(body: unknown): DirectoryUser {
-  const { id, fullName, email, status } = body as DirectoryUser;
-  return { id, fullName, email: email ?? null, status };
+  const { id, fullName, email, status, emailVerifiedAt } = body as {
+    id: Uuid;
+    fullName: string;
+    email: string | null;
+    status: string;
+    emailVerifiedAt: string | null;
+  };
+  return {
+    id,
+    fullName,
+    email: email ?? null,
+    status,
+    emailVerified: Boolean(emailVerifiedAt),
+  };
 }
 
 export class UserServiceClient implements UserDirectory {
@@ -52,6 +65,28 @@ export class UserServiceClient implements UserDirectory {
     const res = await this.request("GET", `/api/users?${query}`);
     const page = (await this.json(res)) as { items: unknown[] };
     return page.items[0] ? toDirectoryUser(page.items[0]) : null;
+  }
+
+  async verifyEmail(id: Uuid, email: string): Promise<DirectoryUser> {
+    const res = await this.request(
+      "POST",
+      `/api/users/${encodeURIComponent(id)}/verify-email`,
+      { email },
+    );
+    if (res.status === 404 || res.status === 409) {
+      const { message } = (await res.json()) as { message: string };
+      throw new UserServiceError(res.status, message);
+    }
+    return toDirectoryUser(await this.json(res));
+  }
+
+  async recordLogin(id: Uuid, provider: AuthProvider): Promise<void> {
+    const res = await this.request(
+      "POST",
+      `/api/users/${encodeURIComponent(id)}/logins`,
+      { provider },
+    );
+    await this.json(res);
   }
 
   async getAccess(id: Uuid): Promise<UserAccess | null> {

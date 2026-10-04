@@ -21,6 +21,7 @@ const sampleUser = {
   fullName: "Super Admin",
   email: "superadmin@gmail.com",
   status: "active",
+  emailVerified: true,
 };
 
 const sampleTokens = {
@@ -145,7 +146,7 @@ export const openApiSpec = {
       User: {
         type: "object",
         description: "User lấy từ user-service",
-        required: ["id", "fullName", "email", "status"],
+        required: ["id", "fullName", "email", "status", "emailVerified"],
         properties: {
           id: { type: "string", format: "uuid" },
           fullName: { type: "string" },
@@ -154,6 +155,7 @@ export const openApiSpec = {
             type: "string",
             description: "active | inactive | blocked | banned | pending",
           },
+          emailVerified: { type: "boolean" },
         },
       },
       RegisterRequest: {
@@ -191,6 +193,16 @@ export const openApiSpec = {
           password: { type: "string" },
           device: ref("DeviceInput"),
         },
+      },
+      VerifyEmailRequest: {
+        type: "object",
+        required: ["token"],
+        properties: { token: { type: "string" } },
+      },
+      ResendVerificationRequest: {
+        type: "object",
+        required: ["email"],
+        properties: { email: { type: "string", format: "email" } },
       },
       RefreshRequest: {
         type: "object",
@@ -369,6 +381,7 @@ export const openApiSpec = {
             fullName: "Nguyen Van A",
             email: "nguyenvana@example.com",
             status: "pending",
+            emailVerified: false,
           }),
           400: errorResponse("Dữ liệu không hợp lệ", {
             missing: "password is required",
@@ -441,6 +454,55 @@ export const openApiSpec = {
             device: "Device is disabled",
           }),
           503: userServiceUnavailable,
+        },
+      },
+    },
+    "/api/auth/verify-email": {
+      post: {
+        tags: ["Auth"],
+        summary: "Xác minh email bằng token trong email",
+        description:
+          "Frontend lấy `token` từ link (`VERIFY_EMAIL_URL?token=...`) rồi gọi API này. Token dùng một lần, hết hạn sau `EMAIL_VERIFICATION_TTL_HOURS` (mặc định 24h). Thành công: user `pending` → `active` và gửi email `welcome`.",
+        requestBody: jsonBody("VerifyEmailRequest", {
+          basic: {
+            summary: "Token từ link",
+            value: { token: "q1Zr3m9XQe4bW7yK0aPz2Lc5Vn8Ht6Js1Df4Gk7Ux0E" },
+          },
+        }),
+        responses: {
+          200: jsonResponse("Đã xác minh", "User", {
+            ...sampleUser,
+            fullName: "Nguyen Van A",
+            email: "nguyenvana@example.com",
+          }),
+          400: errorResponse("Token sai, đã dùng hoặc hết hạn", {
+            invalid: "Invalid or expired verification token",
+            missing: "token is required",
+          }),
+          409: errorResponse("Email đã đổi sau khi gửi link", {
+            changed: "The email has changed since this link was sent",
+          }),
+          503: userServiceUnavailable,
+        },
+      },
+    },
+    "/api/auth/verify-email/resend": {
+      post: {
+        tags: ["Auth"],
+        summary: "Gửi lại email xác minh",
+        description:
+          "Luôn trả 202 (kể cả email không tồn tại hoặc đã xác minh) để không lộ email nào đã đăng ký. Mỗi email tối đa 1 lần / phút; link cũ hết hiệu lực khi gửi link mới.",
+        requestBody: jsonBody("ResendVerificationRequest", {
+          basic: {
+            summary: "Gửi lại",
+            value: { email: "nguyenvana@example.com" },
+          },
+        }),
+        responses: {
+          202: { description: "Đã nhận yêu cầu" },
+          400: errorResponse("Email không hợp lệ", {
+            invalid: "email is invalid",
+          }),
         },
       },
     },
@@ -620,12 +682,37 @@ const unsupportedMediaType = errorResponse(
   { charset: 'unsupported charset "LATIN9"' },
 );
 
+const RATE_LIMITED: Record<string, string> = {
+  "post /api/auth/login": "5 lần đăng nhập sai / 15 phút cho mỗi IP + email",
+  "post /api/auth/register": "10 lần / giờ cho mỗi IP",
+  "post /api/auth/refresh":
+    "100 lần / 15 phút cho mỗi IP (chung với verify-email)",
+  "post /api/auth/verify-email":
+    "100 lần / 15 phút cho mỗi IP (chung với refresh)",
+  "post /api/auth/verify-email/resend": "5 lần / 15 phút cho mỗi IP",
+  "post /oauth/token": "10 lần sai / 15 phút cho mỗi IP + client_id",
+};
+
+const tooManyRequests = (rule: string) =>
+  errorResponse(
+    `Quá nhiều request (${rule}). Xem header RateLimit / Retry-After`,
+    {
+      limited: "Too many requests, please try again later",
+    },
+  );
+
 type Operation = { requestBody?: unknown; responses: Record<string, unknown> };
 
-for (const pathItem of Object.values(openApiSpec.paths)) {
-  for (const operation of Object.values(pathItem) as Operation[]) {
-    if (!operation?.requestBody) continue;
-    operation.responses[413] ??= payloadTooLarge;
-    operation.responses[415] ??= unsupportedMediaType;
+for (const [path, pathItem] of Object.entries(openApiSpec.paths)) {
+  for (const [method, operation] of Object.entries(pathItem) as [
+    string,
+    Operation,
+  ][]) {
+    if (operation.requestBody) {
+      operation.responses[413] ??= payloadTooLarge;
+      operation.responses[415] ??= unsupportedMediaType;
+    }
+    const rule = RATE_LIMITED[`${method} ${path}`];
+    if (rule) operation.responses[429] ??= tooManyRequests(rule);
   }
 }

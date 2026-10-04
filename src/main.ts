@@ -12,7 +12,7 @@ async function bootstrap(): Promise<void> {
   await connectMongo();
   console.log(`Connected to MongoDB (${env.mongodbDbName})`);
 
-  const app = createApp(routes, isMongoConnected);
+  const app = createApp(routes, isMongoConnected, env.http);
   const server = app.listen(env.port, () => {
     console.log(`auth-service listening on http://localhost:${env.port}`);
   });

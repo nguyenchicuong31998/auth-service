@@ -111,6 +111,24 @@ auth-service/
 | Refresh | Tách `sessionId.secret` → session phải còn hiệu lực → hash khớp (không khớp = dùng lại → thu hồi) → thiết bị & user còn hợp lệ → xoay refresh token |
 | Gọi API cần đăng nhập | Middleware `authenticate`: kiểm tra chữ ký/iss/aud/exp **và** session chưa bị thu hồi → logout có hiệu lực ngay trong auth-service |
 | Đổi mật khẩu | Kiểm tra mật khẩu hiện tại → băm mới → thu hồi mọi session khác |
+| Xác minh email | Đăng ký → token 32 byte (lưu SHA-256) → notification-service gửi `email-verification` với `VERIFY_EMAIL_URL?token=…` → frontend gọi `POST /api/auth/verify-email` → user-service `POST /users/{id}/verify-email` (pending → active) → đánh dấu token đã dùng → gửi `welcome` |
+| Gửi lại email | `POST /api/auth/verify-email/resend` luôn 202 (không lộ email); chạy nền; mỗi email tối đa 1 lần / phút; link cũ hết hiệu lực |
+| Ghi nhận đăng nhập | Sau khi login thành công → user-service `POST /users/{id}/logins` (`lastLoginAt`, `lastLoginProvider`); lỗi chỉ ghi log, không chặn đăng nhập |
+
+### 4.2 Bảo vệ chống lạm dụng
+
+| Endpoint | Giới hạn (theo IP, in-memory) |
+|---|---|
+| `POST /api/auth/login` | 5 lần **sai** / 15 phút cho mỗi IP + email (đăng nhập đúng không tính) |
+| `POST /api/auth/register` | 10 / giờ |
+| `POST /api/auth/refresh`, `/verify-email` | 100 / 15 phút (chung) |
+| `POST /api/auth/verify-email/resend` | 5 / 15 phút |
+| `POST /oauth/token` | 10 lần **sai** / 15 phút cho mỗi IP + client_id |
+
+Vượt giới hạn → 429 kèm header `RateLimit-Policy`, `RateLimit`, `Retry-After`. Bộ đếm nằm trong bộ nhớ từng instance –
+chạy nhiều instance thì chuyển sang Redis store. Sau reverse proxy phải đặt `TRUST_PROXY` để lấy đúng IP.
+
+Mọi service đều bật `helmet` (header bảo mật, ẩn `X-Powered-By`) và CORS chỉ cho các origin trong `CORS_ORIGINS`.
 
 Service khác (user-service) chỉ kiểm tra JWT bằng JWKS, không hỏi auth-service ở mỗi request ⇒ sau logout,
 access token còn dùng được ở service khác tối đa `ACCESS_TOKEN_TTL_SECONDS` (15 phút). Đây là đánh đổi chuẩn của JWT.
@@ -157,12 +175,18 @@ service ── Authorization: Bearer ──▶ user-service / service khác (ki�
 | `CLIENT_TOKEN_TTL_SECONDS` | `600` | Token cấp cho OAuth client |
 | `REFRESH_TOKEN_TTL_DAYS` | `30` | |
 | `BCRYPT_ROUNDS` | `12` | |
+| `NOTIFICATION_SERVICE_URL` | `http://localhost:8082` | Gửi email (token service, scope `email:send`) |
+| `VERIFY_EMAIL_URL` | `http://localhost:3000/verify-email` | Trang frontend nhận `?token=` |
+| `EMAIL_VERIFICATION_TTL_HOURS` | `24` | |
+| `CORS_ORIGINS` | trống | Origin trình duyệt được gọi API (phân cách dấu phẩy) |
+| `TRUST_PROXY` | `false` | `true`, số proxy hoặc subnet khi chạy sau load balancer |
+| `RATE_LIMIT_ENABLED` | `true` | Chỉ tắt trong test |
 | `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD` | – | Chỉ dùng cho `npm run seed` |
 
 ## 7. Giới hạn hiện tại & hướng phát triển
 
 - Chỉ đăng nhập email/mật khẩu; `phone_otp`, Google, Facebook, Apple: schema đã sẵn, làm đợt sau.
-- Chưa có xác minh email, quên mật khẩu, giới hạn số lần đăng nhập sai (rate limit / khoá tạm).
+- Chưa có quên mật khẩu. Rate limit lưu trong bộ nhớ (cần Redis khi chạy nhiều instance).
 - Chưa có đồng bộ khi user bị xoá ở user-service (bước 4 – API nội bộ hoặc event).
 - Một khoá ký duy nhất; xoay khoá cần hỗ trợ nhiều khoá trong JWKS.
 - Sau reverse proxy cần bật `trust proxy` để lấy đúng IP client.

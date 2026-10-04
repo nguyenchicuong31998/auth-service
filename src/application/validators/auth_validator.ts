@@ -115,3 +115,15 @@ export function parseChangePasswordInput(body: unknown): ChangePasswordInput {
     newPassword: parseNewPassword(input.newPassword, "newPassword"),
   };
 }
+
+export function parseVerifyEmailInput(body: unknown): string {
+  const input = toObject(body);
+  requireFields(input, ["token"]);
+  return parseString(input.token, "token", 200);
+}
+
+export function parseResendVerificationInput(body: unknown): string {
+  const input = toObject(body);
+  requireFields(input, ["email"]);
+  return parseEmail(input.email);
+}

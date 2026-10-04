@@ -77,6 +77,7 @@ describe("UserServiceClient", () => {
       fullName: USER.fullName,
       email: USER.email,
       status: USER.status,
+      emailVerified: false,
     });
 
     reply = () => [404, { message: "User not found" }];

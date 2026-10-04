@@ -26,12 +26,37 @@ function positiveInt(name: string, fallback: number): number {
   return value;
 }
 
+function url(name: string, fallback: string): string {
+  const value = optional(name) ?? fallback;
+  try {
+    return new URL(value).toString();
+  } catch {
+    throw new Error(`${name} must be a valid URL`);
+  }
+}
+
+function trustProxy(): boolean | number | string {
+  const value = optional("TRUST_PROXY");
+  if (!value || value === "false") return false;
+  if (value === "true") return true;
+  return /^d+$/.test(value) ? Number(value) : value;
+}
+
 export const env = {
   port: positiveInt("PORT", 8081),
   mongodbUri: required("MONGODB_URI"),
   mongodbDbName: process.env.MONGODB_DB_NAME ?? "auth_service",
   dnsServers: list("DNS_SERVERS"),
   userServiceUrl: optional("USER_SERVICE_URL") ?? "http://localhost:8080",
+  notificationServiceUrl:
+    optional("NOTIFICATION_SERVICE_URL") ?? "http://localhost:8082",
+  verifyEmailUrl: url("VERIFY_EMAIL_URL", "http://localhost:3000/verify-email"),
+  emailVerificationTtlHours: positiveInt("EMAIL_VERIFICATION_TTL_HOURS", 24),
+  http: {
+    corsOrigins: list("CORS_ORIGINS"),
+    trustProxy: trustProxy(),
+    rateLimit: process.env.RATE_LIMIT_ENABLED !== "false",
+  },
   jwt: {
     privateKeyPath:
       optional("JWT_PRIVATE_KEY_PATH") ?? DEFAULT_PRIVATE_KEY_PATH,

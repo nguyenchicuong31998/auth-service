@@ -25,6 +25,7 @@ import type {
 } from "../dtos/auth_dto.js";
 import { AppError } from "../errors/app_error.js";
 import { generateToken, hashToken, isSameHash } from "../shared/token_hash.js";
+import type { EmailVerificationService } from "./email_verification_service.js";
 import type {
   ChangePasswordInput,
   DeviceInput,
@@ -63,6 +64,7 @@ export class AuthService {
     private readonly passwords: PasswordHasher,
     private readonly accessTokens: AccessTokenService,
     private readonly refreshTokenTtlMs: number,
+    private readonly verification: EmailVerificationService,
   ) {}
 
   async register(input: RegisterInput): Promise<DirectoryUser> {
@@ -87,6 +89,11 @@ export class AuthService {
       }
       throw error;
     }
+    await this.verification
+      .sendVerification(user)
+      .catch((error: Error) =>
+        console.error("Sending verification email failed:", error.message),
+      );
     return user;
   }
 
@@ -115,6 +122,11 @@ export class AuthService {
     });
     const tokens = await this.startSession(user.id, device.id, client, now);
     await this.identities.markUsed(identity.id, now);
+    await this.users
+      .recordLogin(user.id, "manual")
+      .catch((error: Error) =>
+        console.error("Recording login failed:", error.message),
+      );
     return { ...tokens, deviceId: device.id, user };
   }
 

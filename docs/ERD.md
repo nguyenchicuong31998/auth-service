@@ -162,6 +162,25 @@ Quy tắc chống leo thang quyền:
 - Mỗi lần cấp token: scope thực tế = `scopes` của client **∩ quyền hiện tại của chủ client**.
   Chủ bị gỡ quyền → client mất quyền đó ngay; chủ bị chặn / xoá → `invalid_client`.
 
+### 3.5 `email_verification_tokens`
+
+Token xác minh email, dùng một lần. Không có API CRUD riêng – chỉ dùng trong luồng đăng ký / `verify-email`.
+
+| Cột | Kiểu | Mô tả |
+|---|---|---|
+| `id` | UUID | PK |
+| `userId` | UUID | → `users.id` |
+| `tokenHash` | VARCHAR(255) | Unique – SHA-256 của token gốc; token gốc chỉ nằm trong email |
+| `expiresAt` | TIMESTAMP | `createdAt + EMAIL_VERIFICATION_TTL_HOURS` (mặc định 24h) |
+| `consumedAt` | TIMESTAMP | Nullable – ghi khi xác minh thành công **hoặc** khi bị thay bởi link mới (gửi lại). Không xoá cứng |
+| `createdAt` / `updatedAt` | TIMESTAMP | |
+
+Index: `tokenHash` unique · `(userId, createdAt desc)`.
+
+Email được xác minh là `providerAccountId` của identity `manual`; user-service chỉ chấp nhận nếu trùng email hiện tại
+(đổi email sau khi gửi link → 409). Token chỉ bị đánh dấu dùng **sau khi** user-service xác nhận → user-service lỗi tạm thời
+không làm mất token.
+
 ## 4. Refresh token
 
 - Dạng `<sessionId>.<secret>`; `secret` = 32 byte ngẫu nhiên (base64url). DB chỉ lưu `SHA-256(secret)`.

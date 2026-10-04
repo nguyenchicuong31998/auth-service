@@ -1,4 +1,6 @@
 import express, { type Express, type Router } from "express";
+import cors from "cors";
+import helmet from "helmet";
 import swaggerUi from "swagger-ui-express";
 import { openApiSpec } from "./docs/openapi_spec.js";
 import { errorHandler, notFoundHandler } from "./middlewares/error_handler.js";
@@ -8,11 +10,21 @@ export interface ApiRoute {
   router: Router;
 }
 
+export interface HttpOptions {
+  corsOrigins?: string[];
+  trustProxy?: boolean | number | string;
+}
+
 export function createApp(
   routes: ApiRoute[],
   isDbConnected: () => boolean,
+  { corsOrigins = [], trustProxy = false }: HttpOptions = {},
 ): Express {
   const app = express();
+
+  app.set("trust proxy", trustProxy);
+  app.use(helmet());
+  app.use(cors({ origin: corsOrigins, credentials: true }));
 
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));

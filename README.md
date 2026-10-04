@@ -9,7 +9,7 @@ Kiến trúc: [ARCHITECTURE.md](ARCHITECTURE.md) · Sơ đồ dữ liệu: [docs
 
 - Node.js ≥ 22
 - MongoDB (local hoặc Atlas)
-- **user-service** đang chạy (mặc định `http://localhost:8080`)
+- **user-service** (mặc định `http://localhost:8080`) và **notification-service** (gửi email xác minh, mặc định `http://localhost:8082`) đang chạy
 
 ## Cài đặt lần đầu
 

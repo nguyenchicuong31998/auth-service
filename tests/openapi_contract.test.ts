@@ -5,11 +5,13 @@ import SwaggerParser from "@apidevtools/swagger-parser";
 import AjvModule from "ajv";
 import addFormatsModule from "ajv-formats";
 import {
+  FakeNotifications,
   FakeUserDirectory,
   JWT_OPTIONS,
   startTestServer,
   TEST_PASSWORD,
   WEB_DEVICE,
+  type Api,
   type Json,
   type TestServer,
 } from "./helpers/test_server.js";
@@ -56,6 +58,7 @@ async function call(
   expected: number,
   options: {
     id?: string;
+    api?: Api;
     query?: string;
     body?: unknown;
     raw?: string;
@@ -66,7 +69,11 @@ async function call(
   const path =
     template.replace("{id}", options.id ?? "") +
     (options.query ? `?${options.query}` : "");
-  const res = await server.api(method.toUpperCase(), path, options);
+  const res = await (options.api ?? server.api)(
+    method.toUpperCase(),
+    path,
+    options,
+  );
   const label = `${method.toUpperCase()} ${template} -> ${res.status}`;
   assert.equal(res.status, expected, `${label} ${JSON.stringify(res.body)}`);
 
@@ -120,6 +127,7 @@ describe("OpenAPI document", () => {
       userDirectory: new FakeUserDirectory(),
       passwordHasher: new BcryptPasswordHasher(4),
       accessTokens: new JoseAccessTokenService(server.privateKey, JWT_OPTIONS),
+      notifications: new FakeNotifications(),
     });
 
     const served = new Set<string>(["get /health"]);
@@ -471,6 +479,105 @@ describe("every documented response is real", () => {
     await whileDown(() => call("delete", one, 503, { id: client.id, token }));
     await call("delete", one, 204, { id: client.id, token });
     await call("delete", one, 404, { id: client.id, token });
+  });
+
+  it("email verification", async () => {
+    const before = server.notifications.sent.length;
+    await call("post", "/api/auth/register", 201, {
+      body: {
+        fullName: "Verify Contract",
+        email: "verify-contract@example.com",
+        password: TEST_PASSWORD,
+      },
+    });
+    await server.notifications.waitFor(before + 1);
+    const token = server.notifications.tokenFrom();
+
+    const verify = "/api/auth/verify-email";
+    await call("post", verify, 400, { body: {} });
+    server.users.unavailable = true;
+    try {
+      await call("post", verify, 503, { body: { token } });
+    } finally {
+      server.users.unavailable = false;
+    }
+
+    await call("post", "/api/auth/register", 201, {
+      body: {
+        fullName: "Changed Contract",
+        email: "changed-contract@example.com",
+        password: TEST_PASSWORD,
+      },
+    });
+    await server.notifications.waitFor(before + 2);
+    const changedToken = server.notifications.tokenFrom();
+    const changed = [...server.users.users.values()].find(
+      (user) => user.email === "changed-contract@example.com",
+    )!;
+    server.users.users.set(changed.id, {
+      ...changed,
+      email: "new@example.com",
+    });
+    await call("post", verify, 409, { body: { token: changedToken } });
+
+    const resend = "/api/auth/verify-email/resend";
+    await call("post", resend, 202, {
+      body: { email: "verify-contract@example.com" },
+    });
+    await call("post", resend, 400, { body: { email: "bad" } });
+
+    const issued = server.notifications.sent.length;
+    await call("post", resend, 202, {
+      body: { email: "verify-contract@example.com" },
+    });
+    assert.equal(server.notifications.sent.length, issued);
+    const fresh = server.notifications.sent
+      .filter((mail) => mail.to === "verify-contract@example.com")
+      .map((mail) =>
+        new URL(mail.variables.verifyUrl).searchParams.get("token")!,
+      )
+      .at(-1)!;
+    await call("post", verify, 200, { body: { token: fresh } });
+  });
+
+  it("429 on every rate-limited endpoint", async () => {
+    const limited = await server.startRateLimited();
+    const hammer = async (
+      path: string,
+      body: Json,
+      attempts: number,
+    ): Promise<void> => {
+      for (let i = 0; i < attempts; i += 1) {
+        await limited.api("POST", path, { body });
+      }
+      await call("post", path, 429, { api: limited.api, body });
+    };
+    try {
+      await hammer(
+        "/api/auth/login",
+        { email: "nobody@example.com", password: "x", device: WEB_DEVICE },
+        5,
+      );
+      await hammer("/api/auth/register", { email: "bad" }, 10);
+      await hammer("/api/auth/refresh", { refreshToken: "x" }, 100);
+      await hammer("/api/auth/verify-email", { token: "x" }, 0);
+      await hammer(
+        "/api/auth/verify-email/resend",
+        { email: "nobody@example.com" },
+        5,
+      );
+      await hammer(
+        "/oauth/token",
+        {
+          grant_type: "client_credentials",
+          client_id: "cli_x",
+          client_secret: "x",
+        },
+        10,
+      );
+    } finally {
+      await limited.close();
+    }
   });
 
   it("413 and 415 on every endpoint with a body", async () => {
