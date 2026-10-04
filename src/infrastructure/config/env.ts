@@ -48,6 +48,7 @@ export const env = {
   mongodbDbName: process.env.MONGODB_DB_NAME ?? "auth_service",
   dnsServers: list("DNS_SERVERS"),
   userServiceUrl: optional("USER_SERVICE_URL") ?? "http://localhost:8080",
+  auditServiceUrl: optional("AUDIT_SERVICE_URL"),
   notificationServiceUrl:
     optional("NOTIFICATION_SERVICE_URL") ?? "http://localhost:8082",
   verifyEmailUrl: url("VERIFY_EMAIL_URL", "http://localhost:3000/verify-email"),

@@ -3,7 +3,10 @@ import { SuperAdminSeeder } from "./application/seeders/super_admin_seeder.js";
 import { AuthService } from "./application/services/auth_service.js";
 import { SessionService } from "./application/services/session_service.js";
 import { UserDeviceService } from "./application/services/user_device_service.js";
-import type { AccessTokenService } from "./domain/ports/access_token_service.js";
+import type {
+  AccessTokenClaims,
+  AccessTokenService,
+} from "./domain/ports/access_token_service.js";
 import type { PasswordHasher } from "./domain/ports/password_hasher.js";
 import type { UserDirectory } from "./domain/ports/user_directory.js";
 import { env } from "./infrastructure/config/env.js";
@@ -39,6 +42,12 @@ import type { NotificationSender } from "./domain/ports/notification_sender.js";
 import { MongooseEmailVerificationTokenRepository } from "./infrastructure/database/mongodb/repositories/mongoose_email_verification_token_repository.js";
 import { NotificationClient } from "./infrastructure/http/notification_client.js";
 import { createRateLimits } from "./presentation/middlewares/rate_limit.js";
+import type { AuditSink } from "./domain/ports/audit_sink.js";
+import {
+  AuditClient,
+  DisabledAuditSink,
+} from "./infrastructure/http/audit_client.js";
+import { createAudit } from "./presentation/middlewares/audit.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -47,6 +56,7 @@ export interface ExternalServices {
   passwordHasher: PasswordHasher;
   accessTokens: AccessTokenService;
   notifications: NotificationSender;
+  auditSink: AuditSink;
 }
 
 export interface RouteOptions {
@@ -60,6 +70,7 @@ const SERVICE_SCOPES = [
   "user:verify",
   "user:record-login",
   "email:send",
+  "audit-log:write",
 ];
 
 const loadSigningKey = () => loadPrivateKey(env.jwt.privateKeyPath);
@@ -87,6 +98,9 @@ function createExternalServices(): ExternalServices {
       env.notificationServiceUrl,
       createServiceTokens(signingKey),
     ),
+    auditSink: env.auditServiceUrl
+      ? new AuditClient(env.auditServiceUrl, createServiceTokens(signingKey))
+      : new DisabledAuditSink(),
   };
 }
 
@@ -106,8 +120,17 @@ export function createRoutes(
 ): ApiRoute[] {
   const { identities, devices, sessions, oauthClients, verificationTokens } =
     createRepositories();
-  const { userDirectory, passwordHasher, accessTokens, notifications } =
-    external;
+  const {
+    userDirectory,
+    passwordHasher,
+    accessTokens,
+    notifications,
+    auditSink,
+  } = external;
+  const audit = createAudit(
+    auditSink,
+    (res) => (res.locals.auth as AccessTokenClaims | undefined)?.userId ?? null,
+  );
   const limits = createRateLimits(options.rateLimit);
 
   const verificationService = new EmailVerificationService(
@@ -153,6 +176,7 @@ export function createRoutes(
         new AuthController(authService, verificationService),
         authenticate,
         limits,
+        audit,
       ),
     },
     {
@@ -160,6 +184,7 @@ export function createRoutes(
       router: createSessionRoutes(
         new SessionController(sessionService),
         authenticate,
+        audit,
       ),
     },
     {
@@ -167,6 +192,7 @@ export function createRoutes(
       router: createUserDeviceRoutes(
         new UserDeviceController(userDeviceService),
         authenticate,
+        audit,
       ),
     },
     {
@@ -175,6 +201,7 @@ export function createRoutes(
         new OAuthClientController(oauthClientService),
         authenticate,
         authorize,
+        audit,
       ),
     },
     {

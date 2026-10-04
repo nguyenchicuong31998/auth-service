@@ -10,6 +10,8 @@ import { getAuth, getIdParam } from "../utils/request.js";
 export class OAuthClientController {
   constructor(private readonly clients: OAuthClientService) {}
 
+  current = (req: Request) => this.clients.get(getIdParam(req));
+
   create = async (req: Request, res: Response) => {
     const input = parseCreateOAuthClientInput(req.body);
     res.setHeader("Cache-Control", "no-store");

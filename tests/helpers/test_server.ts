@@ -4,6 +4,10 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { DuplicateKeyError } from "../../src/domain/errors/duplicate_key_error.js";
 import { UserServiceError } from "../../src/domain/errors/user_service_error.js";
+import type {
+  AuditEvent,
+  AuditSink,
+} from "../../src/domain/ports/audit_sink.js";
 import type { NotificationSender } from "../../src/domain/ports/notification_sender.js";
 import type {
   DirectoryUser,
@@ -153,11 +157,29 @@ export class FakeNotifications implements NotificationSender {
   }
 }
 
+export class CapturingAuditSink implements AuditSink {
+  readonly events: AuditEvent[] = [];
+
+  record(event: AuditEvent): void {
+    this.events.push(event);
+  }
+
+  async next(predicate: (event: AuditEvent) => boolean): Promise<AuditEvent> {
+    for (let i = 0; i < 50; i += 1) {
+      const found = this.events.find(predicate);
+      if (found) return found;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("Expected audit event was not recorded");
+  }
+}
+
 export interface TestServer {
   baseUrl: string;
   api: Api;
   users: FakeUserDirectory;
   notifications: FakeNotifications;
+  audits: CapturingAuditSink;
   privateKey: KeyObject;
   mongoose: typeof import("mongoose").default;
   register(email: string, password?: string): Promise<Json>;
@@ -194,11 +216,13 @@ export async function startTestServer(
   const privateKey = generatePrivateKey();
   const passwordHasher = new BcryptPasswordHasher(4);
   const notifications = new FakeNotifications();
+  const audits = new CapturingAuditSink();
   const external = {
     userDirectory: users,
     passwordHasher,
     accessTokens: new JoseAccessTokenService(privateKey, JWT_OPTIONS),
     notifications,
+    auditSink: audits,
   };
 
   async function listen(withRateLimit: boolean) {
@@ -243,6 +267,7 @@ export async function startTestServer(
     api,
     users,
     notifications,
+    audits,
     privateKey,
     mongoose,
     async register(email, password = TEST_PASSWORD) {

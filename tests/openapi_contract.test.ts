@@ -128,6 +128,7 @@ describe("OpenAPI document", () => {
       passwordHasher: new BcryptPasswordHasher(4),
       accessTokens: new JoseAccessTokenService(server.privateKey, JWT_OPTIONS),
       notifications: new FakeNotifications(),
+      auditSink: { record: () => undefined },
     });
 
     const served = new Set<string>(["get /health"]);

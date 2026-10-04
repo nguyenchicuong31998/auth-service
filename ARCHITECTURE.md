@@ -148,6 +148,20 @@ service ── Authorization: Bearer ──▶ user-service / service khác (ki�
 - API quản trị `/api/oauth-clients` cần permission `oauth-client:*`. auth-service hỏi quyền của user qua
   `GET /api/users/{id}/effective-permissions` (token service, scope `user:read`).
 
+### Audit
+
+Mỗi thay đổi thành công (2xx) trên các route khai báo `audit("<resource>")` được gửi sang **audit-service** (chạy nền,
+thử lại 1s/5s/15s; field chứa password/secret/token/hash bị ẩn). `oldValue` đọc trước khi sửa/xoá, `newValue` = response.
+Để trống `AUDIT_SERVICE_URL` = tắt audit.
+
+| Resource | Route |
+|---|---|
+| `auth-register` · `auth-verify-email` | userId null (route công khai), newValue = user |
+| `auth-login` | userId null, resourceId = user, **không lưu body** (token) |
+| `auth-logout` · `auth-logout-all` · `auth-password` | userId = người dùng, không lưu body |
+| `session` · `device` · `oauth-client` | thu hồi session, sửa thiết bị, quản lý OAuth client (secret bị ẩn) |
+| _không ghi_ | refresh, gửi lại email, `/oauth/token`, mọi request lỗi |
+
 ## 5. Lỗi & HTTP status
 
 | Nguồn | Status |
@@ -181,6 +195,7 @@ service ── Authorization: Bearer ──▶ user-service / service khác (ki�
 | `CORS_ORIGINS` | trống | Origin trình duyệt được gọi API (phân cách dấu phẩy) |
 | `TRUST_PROXY` | `false` | `true`, số proxy hoặc subnet khi chạy sau load balancer |
 | `RATE_LIMIT_ENABLED` | `true` | Chỉ tắt trong test |
+| `AUDIT_SERVICE_URL` | trống | Trống = tắt audit (dùng token service tự ký, scope `audit-log:write`) |
 | `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD` | – | Chỉ dùng cho `npm run seed` |
 
 ## 7. Giới hạn hiện tại & hướng phát triển
