@@ -25,8 +25,17 @@ sequenceDiagram
     U->>U: tự kiểm tra chữ ký JWT bằng public key
 ```
 
-Access token chỉ chứa định danh: `sub` = userId, `sid` = sessionId, `iss`, `aud`, `iat`, `exp`, `jti`.
+Access token chỉ chứa định danh: `kind` = `user`, `sub` = userId, `sid` = sessionId, `iss`, `aud`, `iat`, `exp`, `jti`.
 Quyền (role/permission) **không** nằm trong token: service nhận request tự tra quyền (user-service sở hữu dữ liệu quyền).
+
+Có hai loại token, cùng khoá ký RS256, phân biệt bằng claim `kind`:
+
+| `kind` | `sub` | Claim riêng | Thời hạn | Dùng cho |
+|---|---|---|---|---|
+| `user` | userId | `sid` (session) | `ACCESS_TOKEN_TTL_SECONDS` | Người dùng gọi API |
+| `service` | `auth-service` | `scope` = `user:create user:read` | 5 phút, cache, tự làm mới | auth-service gọi user-service (đăng ký, đăng nhập, seed) |
+
+auth-service chỉ chấp nhận token `kind: "user"` ở các API của mình; user-service chỉ cho token service làm đúng các quyền trong `scope`.
 
 ## 2. Kiến trúc phân tầng (Clean Architecture)
 
@@ -78,7 +87,7 @@ auth-service/
 │  ├─ infrastructure/
 │  │  ├─ config/env.ts
 │  │  ├─ database/mongodb/                connection · mongo_errors · models/ · repositories/mongoose_<bảng>_repository.ts
-│  │  ├─ security/                        bcrypt_password_hasher · jose_access_token_service · rsa_key_file
+│  │  ├─ security/                        jwt_signer · jose_access_token_service (token user) · service_token_provider (token service) · bcrypt_password_hasher · rsa_key_file
 │  │  └─ http/user_service_client.ts      gọi user-service
 │  └─ presentation/
 │     ├─ app.ts                           json, /health, /docs, routes, 404, error handler
@@ -89,7 +98,8 @@ auth-service/
 └─ tests/
    ├─ helpers/test_server.ts              app trên DB *_test riêng + FakeUserDirectory + khoá RSA tạm
    ├─ auth_api.test.ts                    e2e mọi luồng & trường hợp lỗi
-   └─ openapi_contract.test.ts            Swagger ↔ API thật (route, mọi status, schema response)
+   ├─ openapi_contract.test.ts            Swagger ↔ API thật (route, mọi status, schema response)
+   └─ user_service_client.test.ts         gọi user-service: gửi token service (đúng claim, có cache), map lỗi 404/409/503
 ```
 
 ## 4. Các luồng chính
@@ -125,7 +135,7 @@ access token còn dùng được ở service khác tối đa `ACCESS_TOKEN_TTL_S
 | `MONGODB_URI` | – (bắt buộc) | |
 | `MONGODB_DB_NAME` | `auth_service` | |
 | `DNS_SERVERS` | – | DNS cho `mongodb+srv://` |
-| `USER_SERVICE_URL` | `http://localhost:8080` | |
+| `USER_SERVICE_URL` | `http://localhost:8080` | Gọi bằng token service (mục 1) |
 | `JWT_PRIVATE_KEY_PATH` | `keys/private.pem` | Khoá RSA ký JWT |
 | `JWT_ISSUER` / `JWT_AUDIENCE` | `auth-service` / `ms-api` | Service kiểm tra token phải dùng cùng giá trị |
 | `ACCESS_TOKEN_TTL_SECONDS` | `900` | |
