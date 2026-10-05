@@ -3,6 +3,7 @@ import { AppError } from "../../application/errors/app_error.js";
 import { OAuthError } from "../../application/errors/oauth_error.js";
 import { DuplicateKeyError } from "../../domain/errors/duplicate_key_error.js";
 import { UserServiceError } from "../../domain/errors/user_service_error.js";
+import { traceIdOf } from "./trace.js";
 
 interface HttpError {
   status: number;
@@ -66,7 +67,7 @@ export function errorHandler(
   }
   const appError = toAppError(err);
   if (!appError) {
-    console.error(err);
+    console.error(`Unhandled error trace=${traceIdOf(res) ?? "-"}`, err);
     res.status(500).json({ message: "Internal server error" });
     return;
   }

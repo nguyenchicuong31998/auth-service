@@ -1,4 +1,5 @@
 import type { NextFunction, Request, RequestHandler, Response } from "express";
+import { traceIdOf } from "./trace.js";
 
 type Actor =
   { kind: "user"; userId: string } | { kind: "service"; service: string };
@@ -41,6 +42,7 @@ export function createRequestLogger(service: string): RequestHandler {
         `${ms.toFixed(1)}ms`,
         `ip=${req.ip ?? "-"}`,
         actorOf(res),
+        `trace=${traceIdOf(res) ?? "-"}`,
       ].join(" ");
       const log = res.statusCode >= 500 ? console.error : console.log;
       log(errorMessage ? `${line} – ${errorMessage}` : line);

@@ -5,6 +5,11 @@ import swaggerUi from "swagger-ui-express";
 import { openApiSpec } from "./docs/openapi_spec.js";
 import { errorHandler, notFoundHandler } from "./middlewares/error_handler.js";
 import { createRequestLogger } from "./middlewares/request_logger.js";
+import { traceRequests } from "./middlewares/trace.js";
+import {
+  propagateTraceOnFetch,
+  TRACE_ID_HEADER,
+} from "../shared/trace_context.js";
 
 export interface ApiRoute {
   path: string;
@@ -29,9 +34,17 @@ export function createApp(
   const app = express();
 
   app.set("trust proxy", trustProxy);
+  propagateTraceOnFetch();
+  app.use(traceRequests());
   if (logRequests) app.use(createRequestLogger("auth-service"));
   app.use(helmet());
-  app.use(cors({ origin: corsOrigins, credentials: true }));
+  app.use(
+    cors({
+      origin: corsOrigins,
+      credentials: true,
+      exposedHeaders: [TRACE_ID_HEADER],
+    }),
+  );
 
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
