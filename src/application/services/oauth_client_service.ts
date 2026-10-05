@@ -66,7 +66,7 @@ export class OAuthClientService {
     id: Uuid,
     changes: OAuthClientChanges,
   ): Promise<OAuthClientDto> {
-    await this.findChangeable(id);
+    await this.findChangeable(auth, id);
     if (changes.scopes) {
       await this.permissions.assertCanGrant(auth.userId, changes.scopes);
     }
@@ -75,8 +75,11 @@ export class OAuthClientService {
     return toOAuthClientDto(updated);
   }
 
-  async rotateSecret(id: Uuid): Promise<OAuthClientWithSecretDto> {
-    await this.findChangeable(id);
+  async rotateSecret(
+    auth: AccessTokenClaims,
+    id: Uuid,
+  ): Promise<OAuthClientWithSecretDto> {
+    await this.findChangeable(auth, id);
     const clientSecret = generateToken();
     const updated = await this.clients.update(id, {
       clientSecretHash: hashToken(clientSecret),
@@ -85,7 +88,8 @@ export class OAuthClientService {
     return { ...toOAuthClientDto(updated), clientSecret };
   }
 
-  async delete(id: Uuid): Promise<void> {
+  async delete(auth: AccessTokenClaims, id: Uuid): Promise<void> {
+    await this.findManageable(auth, id);
     if (!(await this.clients.softDelete(id))) throw clientNotFound();
   }
 
@@ -95,8 +99,20 @@ export class OAuthClientService {
     return client;
   }
 
-  private async findChangeable(id: Uuid): Promise<OAuthClient> {
+  private async findManageable(
+    auth: AccessTokenClaims,
+    id: Uuid,
+  ): Promise<OAuthClient> {
     const client = await this.findOrFail(id);
+    await this.permissions.assertCanGrant(auth.userId, client.scopes);
+    return client;
+  }
+
+  private async findChangeable(
+    auth: AccessTokenClaims,
+    id: Uuid,
+  ): Promise<OAuthClient> {
+    const client = await this.findManageable(auth, id);
     if (client.status === "revoked") {
       throw AppError.conflict("A revoked OAuth client cannot be changed");
     }

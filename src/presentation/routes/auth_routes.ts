@@ -14,7 +14,7 @@ export function createAuthRoutes(
     .post("/register", limits.register, audit("auth-register"), auth.register)
     .post(
       "/login",
-      limits.login,
+      ...limits.login,
       audit("auth-login", {
         captureResponse: false,
         resourceId: (_req, body) =>

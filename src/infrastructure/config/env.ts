@@ -39,7 +39,7 @@ function trustProxy(): boolean | number | string {
   const value = optional("TRUST_PROXY");
   if (!value || value === "false") return false;
   if (value === "true") return true;
-  return /^d+$/.test(value) ? Number(value) : value;
+  return /^\d+$/.test(value) ? Number(value) : value;
 }
 
 export const env = {

@@ -80,6 +80,17 @@ describe("rate limits", () => {
     assert.equal(statuses.at(-1), 429);
   });
 
+  it("blocks an IP spraying failed logins across many emails", async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      statuses.push((await login(`spray-${i}@example.com`, "wrong")).status);
+    }
+    assert.ok(statuses.includes(429));
+    assert.ok(statuses.filter((s) => s === 401).length < 30);
+    const blocked = await login("other@example.com", TEST_PASSWORD);
+    assert.equal(blocked.status, 429);
+  });
+
   it("sends security headers and no X-Powered-By", async () => {
     const res = await limited.api("GET", "/health");
     assert.equal(res.headers.get("x-powered-by"), null);

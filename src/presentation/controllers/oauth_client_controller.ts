@@ -33,11 +33,11 @@ export class OAuthClientController {
 
   rotateSecret = async (req: Request, res: Response) => {
     res.setHeader("Cache-Control", "no-store");
-    res.json(await this.clients.rotateSecret(getIdParam(req)));
+    res.json(await this.clients.rotateSecret(getAuth(res), getIdParam(req)));
   };
 
   delete = async (req: Request, res: Response) => {
-    await this.clients.delete(getIdParam(req));
+    await this.clients.delete(getAuth(res), getIdParam(req));
     res.status(204).end();
   };
 }

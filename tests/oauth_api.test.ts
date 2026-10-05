@@ -225,6 +225,30 @@ describe("privilege escalation", () => {
     assert.equal(blocked.status, 401);
     assert.equal(blocked.body.error, "invalid_client");
   });
+
+  it("cannot take over a client with scopes the actor does not have", async () => {
+    const owner = await adminWith(["user:create", "user:read"]);
+    const client = await createClient(owner.token, ["user:create"]);
+    const other = await adminWith(["user:read"]);
+
+    for (const [method, path, body] of [
+      ["POST", `/api/oauth-clients/${client.id}/secret`, undefined],
+      ["PATCH", `/api/oauth-clients/${client.id}`, { status: "inactive" }],
+      ["DELETE", `/api/oauth-clients/${client.id}`, undefined],
+    ] as const) {
+      const res = await server.api(method, path, { token: other.token, body });
+      assert.equal(res.status, 403, `${method} ${path}`);
+    }
+    const stillWorks = await requestToken(credentials(client));
+    assert.equal(stillWorks.status, 200);
+
+    const rotated = await server.api(
+      "POST",
+      `/api/oauth-clients/${client.id}/secret`,
+      { token: owner.token },
+    );
+    assert.equal(rotated.status, 200);
+  });
 });
 
 describe("client lifecycle", () => {
