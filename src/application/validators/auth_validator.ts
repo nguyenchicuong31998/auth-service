@@ -14,6 +14,7 @@ import {
 } from "./common_validator.js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PHONE_RE = /^\+?[0-9]{8,15}$/;
 export const PASSWORD_MIN_LENGTH = 8;
 export const PASSWORD_MAX_BYTES = 72;
 
@@ -36,6 +37,14 @@ export interface LoginInput {
   device: DeviceInput;
 }
 
+export interface PhoneLoginInput {
+  phone: string;
+  code: string;
+  /** Used only when the phone has no account yet. */
+  fullName: string | null;
+  device: DeviceInput;
+}
+
 export interface ChangePasswordInput {
   currentPassword: string;
   newPassword: string;
@@ -45,6 +54,13 @@ export function parseEmail(value: unknown): string {
   const email = parseString(value, "email", 255).toLowerCase();
   if (!EMAIL_RE.test(email)) throw badRequest("email is invalid");
   return email;
+}
+
+// Same normalization as user-service: drop spaces, dots and dashes.
+export function parsePhone(value: unknown): string {
+  const phone = parseString(value, "phone", 20).replace(/[\s.-]/g, "");
+  if (!PHONE_RE.test(phone)) throw badRequest("phone is invalid");
+  return phone;
 }
 
 function parsePassword(value: unknown, field: string): string {
@@ -97,6 +113,27 @@ export function parseLoginInput(body: unknown): LoginInput {
   return {
     email: parseEmail(input.email),
     password: parsePassword(input.password, "password"),
+    device: parseDevice(input.device),
+  };
+}
+
+export function parsePhoneOtpRequest(body: unknown): string {
+  const input = toObject(body);
+  requireFields(input, ["phone"]);
+  return parsePhone(input.phone);
+}
+
+export function parsePhoneLoginInput(body: unknown): PhoneLoginInput {
+  const input = toObject(body);
+  requireFields(input, ["phone", "code", "device"]);
+  const code = parseString(input.code, "code", 6);
+  if (!/^\d{6}$/.test(code)) throw badRequest("code must be 6 digits");
+  return {
+    phone: parsePhone(input.phone),
+    code,
+    fullName:
+      nullable(input.fullName, (name) => parseString(name, "fullName", 255)) ??
+      null,
     device: parseDevice(input.device),
   };
 }

@@ -5,6 +5,11 @@ import {
   type Session,
 } from "../../domain/entities/session.js";
 import type { UserDevice } from "../../domain/entities/user_device.js";
+import type {
+  AuthProvider,
+  UserIdentity,
+} from "../../domain/entities/user_identity.js";
+import { UserServiceError } from "../../domain/errors/user_service_error.js";
 import { DuplicateKeyError } from "../../domain/errors/duplicate_key_error.js";
 import type {
   AccessTokenClaims,
@@ -26,10 +31,12 @@ import type {
 import { AppError } from "../errors/app_error.js";
 import { generateToken, hashToken, isSameHash } from "../shared/token_hash.js";
 import type { EmailVerificationService } from "./email_verification_service.js";
+import type { PhoneOtpService } from "./phone_otp_service.js";
 import type {
   ChangePasswordInput,
   DeviceInput,
   LoginInput,
+  PhoneLoginInput,
   RegisterInput,
 } from "../validators/auth_validator.js";
 
@@ -65,6 +72,7 @@ export class AuthService {
     private readonly accessTokens: AccessTokenService,
     private readonly refreshTokenTtlMs: number,
     private readonly verification: EmailVerificationService,
+    private readonly phoneOtps: PhoneOtpService,
   ) {}
 
   async register(input: RegisterInput): Promise<DirectoryUser> {
@@ -75,6 +83,8 @@ export class AuthService {
     const user = await this.users.register({
       fullName: input.fullName,
       email: input.email,
+      phone: null,
+      registeredFrom: "manual",
     });
     try {
       await this.identities.create({
@@ -112,22 +122,35 @@ export class AuthService {
 
     const user = await this.users.findById(identity.userId);
     if (!user) throw invalidCredentials();
-    if (!canLogin(user)) throw AppError.forbidden(`Account is ${user.status}`);
+    return this.signIn(user, identity, input.device, client);
+  }
 
-    const now = new Date();
-    const device = await this.resolveDevice(user.id, input.device, client, now);
-    await this.sessions.revokeByDevice(device.id, {
-      reason: "replaced",
-      at: now,
-    });
-    const tokens = await this.startSession(user.id, device.id, client, now);
-    await this.identities.markUsed(identity.id, now);
-    await this.users
-      .recordLogin(user.id, "manual")
-      .catch((error: Error) =>
-        console.error("Recording login failed:", error.message),
-      );
-    return { ...tokens, deviceId: device.id, user };
+  /**
+   * Passwordless login: a valid OTP proves the caller owns the phone. An
+   * unknown phone gets an account on the spot (sign-up and login in one).
+   */
+  async phoneLogin(
+    input: PhoneLoginInput,
+    client: ClientContext,
+  ): Promise<LoginResultDto & { isNewUser: boolean }> {
+    await this.phoneOtps.consumeCode(input.phone, input.code);
+
+    let identity = await this.identities.findByProviderAccount(
+      "phone_otp",
+      input.phone,
+    );
+    const isNewUser = !identity;
+    identity ??= await this.createPhoneAccount(input);
+
+    let user = await this.users.findById(identity.userId);
+    if (!user) throw AppError.unauthorized("User no longer exists");
+    if (!user.phoneVerified) {
+      user = await this.markPhoneVerified(user.id, input.phone);
+    }
+    return {
+      ...(await this.signIn(user, identity, input.device, client)),
+      isNewUser,
+    };
   }
 
   async refresh(refreshToken: string): Promise<TokenPairDto> {
@@ -196,26 +219,100 @@ export class AuthService {
         "newPassword must be different from currentPassword",
       );
     }
-    const identity = await this.identities.findByUser(auth.userId, "manual");
-    if (!identity?.password) {
+    const identities = (
+      await this.identities.findAllByUser(auth.userId, "manual")
+    ).filter((identity) => identity.password);
+    if (identities.length === 0) {
       throw AppError.badRequest(
         "Password login is not enabled for this account",
       );
     }
     if (
-      !(await this.passwords.verify(input.currentPassword, identity.password))
+      !(await this.passwords.verify(
+        input.currentPassword,
+        identities[0].password!,
+      ))
     ) {
       throw AppError.badRequest("Current password is incorrect");
     }
-    await this.identities.updatePassword(
-      identity.id,
-      await this.passwords.hash(input.newPassword),
-    );
+    const hash = await this.passwords.hash(input.newPassword);
+    // Email and phone logins share one password, so change it on both.
+    for (const identity of identities) {
+      await this.identities.updatePassword(identity.id, hash);
+    }
     await this.sessions.revokeByUser(auth.userId, {
       reason: "password_changed",
       at: new Date(),
       exceptId: auth.sessionId,
     });
+  }
+
+  private async signIn(
+    user: DirectoryUser,
+    identity: UserIdentity,
+    deviceInput: DeviceInput,
+    client: ClientContext,
+  ): Promise<LoginResultDto> {
+    if (!canLogin(user)) throw AppError.forbidden(`Account is ${user.status}`);
+
+    const now = new Date();
+    const device = await this.resolveDevice(user.id, deviceInput, client, now);
+    await this.sessions.revokeByDevice(device.id, {
+      reason: "replaced",
+      at: now,
+    });
+    const tokens = await this.startSession(user.id, device.id, client, now);
+    await this.identities.markUsed(identity.id, now);
+    await this.users
+      .recordLogin(user.id, identity.provider as AuthProvider)
+      .catch((error: Error) =>
+        console.error("Recording login failed:", error.message),
+      );
+    return { ...tokens, deviceId: device.id, user };
+  }
+
+  private async createPhoneAccount(
+    input: PhoneLoginInput,
+  ): Promise<UserIdentity> {
+    const user = await this.users.register({
+      fullName: input.fullName ?? input.phone,
+      email: null,
+      phone: input.phone,
+      registeredFrom: "phone_otp",
+    });
+    try {
+      return await this.identities.create({
+        userId: user.id,
+        provider: "phone_otp",
+        providerAccountId: input.phone,
+        password: null,
+      });
+    } catch (error) {
+      if (!(error instanceof DuplicateKeyError)) throw error;
+      // A concurrent login created the account first: use that one.
+      const existing = await this.identities.findByProviderAccount(
+        "phone_otp",
+        input.phone,
+      );
+      if (!existing) throw error;
+      return existing;
+    }
+  }
+
+  private async markPhoneVerified(
+    userId: Uuid,
+    phone: string,
+  ): Promise<DirectoryUser> {
+    try {
+      return await this.users.verifyPhone(userId, phone);
+    } catch (error) {
+      if (error instanceof UserServiceError && error.status === 409) {
+        throw AppError.conflict(
+          "This phone number no longer belongs to the account",
+        );
+      }
+      throw error;
+    }
   }
 
   private async rejectWithDummyHash(password: string): Promise<false> {

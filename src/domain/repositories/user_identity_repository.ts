@@ -12,10 +12,7 @@ export interface UserIdentityRepository {
     provider: AuthProvider,
     providerAccountId: string,
   ): Promise<UserIdentity | null>;
-  findByUser(
-    userId: Uuid,
-    provider: AuthProvider,
-  ): Promise<UserIdentity | null>;
+  findAllByUser(userId: Uuid, provider: AuthProvider): Promise<UserIdentity[]>;
   updatePassword(id: Uuid, password: string): Promise<void>;
   markUsed(id: Uuid, at: Date): Promise<void>;
 }

@@ -1,7 +1,7 @@
 # auth-service
 
-Xác thực cho hệ thống microservice: đăng ký, đăng nhập email/mật khẩu, JWT (RS256), refresh token,
-session và thiết bị. Node.js 22 · TypeScript · Express 5 · MongoDB.
+Xác thực cho hệ thống microservice: đăng ký/đăng nhập **email + mật khẩu**, đăng nhập **số điện thoại bằng OTP** (không mật khẩu),
+xác minh email (link), JWT (RS256), refresh token, session và thiết bị. Node.js 22 · TypeScript · Express 5 · MongoDB.
 
 Kiến trúc: [ARCHITECTURE.md](ARCHITECTURE.md) · Sơ đồ dữ liệu: [docs/ERD.md](docs/ERD.md)
 

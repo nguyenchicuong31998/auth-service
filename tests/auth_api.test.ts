@@ -233,6 +233,7 @@ describe("POST /api/auth/login", () => {
 
   it("validates the body", async () => {
     const cases: [unknown, string][] = [
+      [{ password: "x", device: WEB_DEVICE }, "email is required"],
       [{ email: "a@b.co", password: "x" }, "device is required"],
       [
         { email: "a@b.co", password: "x", device: "web" },

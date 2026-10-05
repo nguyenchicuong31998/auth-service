@@ -31,9 +31,19 @@ erDiagram
         UUID id PK
         UUID userId FK
         ENUM provider "manual | phone_otp | google | facebook | apple"
-        VARCHAR providerAccountId
+        VARCHAR providerAccountId "manual: email · phone_otp: số điện thoại"
         VARCHAR password "nullable, bcrypt"
         TIMESTAMP lastUsedAt "nullable"
+        TIMESTAMP createdAt
+        TIMESTAMP updatedAt "nullable"
+    }
+    phone_verification_otps {
+        UUID id PK
+        VARCHAR phone
+        VARCHAR codeHash "SHA-256(phone:code)"
+        TIMESTAMP expiresAt "TTL index, mặc định 30s"
+        INT attempts
+        TIMESTAMP consumedAt "nullable"
         TIMESTAMP createdAt
         TIMESTAMP updatedAt "nullable"
     }
@@ -77,8 +87,8 @@ email/mật khẩu" là **cùng một user**, không phải hai tài khoản.
 | `id` | UUID | PK |
 | `userId` | UUID | → `users.id` (user-service) |
 | `provider` | ENUM | `manual`, `phone_otp`, `google`, `facebook`, `apple` |
-| `providerAccountId` | VARCHAR(255) | email (`manual`), số điện thoại (`phone_otp`), hoặc `sub`/user id của nhà cung cấp |
-| `password` | VARCHAR(255) | Chỉ có với `manual`/`phone_otp`; **bcrypt** |
+| `providerAccountId` | VARCHAR(255) | `manual`: email (chữ thường) · `phone_otp`: số điện thoại (đã bỏ khoảng trắng/`.`/`-`) · mạng xã hội: `sub`/user id của nhà cung cấp |
+| `password` | VARCHAR(255) | Chỉ có với `manual` (**bcrypt**). `phone_otp` không có mật khẩu (`null`) – đăng nhập bằng OTP |
 | `lastUsedAt` | TIMESTAMP | Lần cuối đăng nhập bằng cách này |
 | `createdAt` / `updatedAt` | TIMESTAMP | `updatedAt` ghi khi đổi mật khẩu |
 
@@ -87,7 +97,7 @@ Index: `(provider, providerAccountId)` **unique** – một tài khoản Google/
 Mật khẩu: bcrypt (`BCRYPT_ROUNDS`, mặc định 12), tối thiểu 8 ký tự, tối đa 72 byte (giới hạn của bcrypt).
 Không có cơ chế mật khẩu cũ (SHA-256) vì hệ thống mới, không có dữ liệu cần chuyển đổi.
 
-Đợt hiện tại chỉ dùng `manual`. Schema đã sẵn cho `phone_otp`, `google`, `facebook`, `apple`.
+Đang dùng `manual` (email + mật khẩu) và `phone_otp` (số điện thoại + OTP). Schema đã sẵn cho `google`, `facebook`, `apple`.
 
 ### 3.2 `user_devices`
 
@@ -172,14 +182,31 @@ Token xác minh email, dùng một lần. Không có API CRUD riêng – chỉ d
 | `userId` | UUID | → `users.id` |
 | `tokenHash` | VARCHAR(255) | Unique – SHA-256 của token gốc; token gốc chỉ nằm trong email |
 | `expiresAt` | TIMESTAMP | `createdAt + EMAIL_VERIFICATION_TTL_HOURS` (mặc định 24h) |
-| `consumedAt` | TIMESTAMP | Nullable – ghi khi xác minh thành công **hoặc** khi bị thay bởi link mới (gửi lại). Không xoá cứng |
+| `consumedAt` | TIMESTAMP | Nullable – ghi khi đăng nhập thành công **hoặc** khi bị thay bởi mã mới |
 | `createdAt` / `updatedAt` | TIMESTAMP | |
 
 Index: `tokenHash` unique · `(userId, createdAt desc)`.
 
-Email được xác minh là `providerAccountId` của identity `manual`; user-service chỉ chấp nhận nếu trùng email hiện tại
+Email được xác minh là `providerAccountId` của identity `manual` có dạng email; user-service chỉ chấp nhận nếu trùng email hiện tại
 (đổi email sau khi gửi link → 409). Token chỉ bị đánh dấu dùng **sau khi** user-service xác nhận → user-service lỗi tạm thời
 không làm mất token.
+
+### 3.6 `phone_verification_otps`
+
+Mã OTP 6 số để **đăng nhập bằng số điện thoại**. Gắn với số điện thoại (không gắn user), vì số mới chưa có tài khoản lúc xin mã. Không có API CRUD riêng – chỉ dùng trong `POST /api/auth/phone/otp` và `/phone/login`.
+
+| Cột | Kiểu | Mô tả |
+|---|---|---|
+| `id` | UUID | PK |
+| `phone` | VARCHAR(20) | Số đã chuẩn hoá lúc gửi mã |
+| `codeHash` | VARCHAR(255) | `SHA-256(phone:code)`; mã gốc chỉ nằm trong SMS (hiện in ra console) |
+| `expiresAt` | TIMESTAMP | `createdAt + PHONE_OTP_TTL_SECONDS` (mặc định **30 giây**) |
+| `attempts` | INT | Số lần nhập sai; đạt `PHONE_OTP_MAX_ATTEMPTS` (mặc định 5) → mã bị khoá |
+| `consumedAt` | TIMESTAMP | Nullable – ghi khi xác minh thành công **hoặc** khi bị thay bởi mã mới |
+| `createdAt` / `updatedAt` | TIMESTAMP | |
+
+Index: `(phone, createdAt desc)` · **TTL** `expiresAt` (`expireAfterSeconds: 0`) → MongoDB **tự xoá** OTP ngay khi hết hạn.
+TTL monitor của MongoDB chạy khoảng 60 giây/lần, nên bản ghi có thể còn thêm tối đa ~1 phút; code luôn kiểm tra `expiresAt` nên mã đã hết hạn không bao giờ dùng được.
 
 ## 4. Refresh token
 

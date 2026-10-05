@@ -47,15 +47,14 @@ export class MongooseUserIdentityRepository implements UserIdentityRepository {
     return doc ? toEntity(doc) : null;
   }
 
-  async findByUser(
+  async findAllByUser(
     userId: Uuid,
     provider: AuthProvider,
-  ): Promise<UserIdentity | null> {
-    const doc = await UserIdentityModel.findOne({
-      userId,
-      provider,
-    }).lean<UserIdentityDocument>();
-    return doc ? toEntity(doc) : null;
+  ): Promise<UserIdentity[]> {
+    const docs = await UserIdentityModel.find({ userId, provider })
+      .sort({ createdAt: 1 })
+      .lean<UserIdentityDocument[]>();
+    return docs.map(toEntity);
   }
 
   async updatePassword(id: Uuid, password: string): Promise<void> {

@@ -1,4 +1,5 @@
 import { isVerificationTokenUsable } from "../../domain/entities/email_verification_token.js";
+import { isEmailAccount } from "../../domain/entities/user_identity.js";
 import { UserServiceError } from "../../domain/errors/user_service_error.js";
 import type { NotificationSender } from "../../domain/ports/notification_sender.js";
 import type {
@@ -63,7 +64,9 @@ export class EmailVerificationService {
       throw invalidToken();
     }
 
-    const identity = await this.identities.findByUser(token.userId, "manual");
+    const identity = (
+      await this.identities.findAllByUser(token.userId, "manual")
+    ).find((candidate) => isEmailAccount(candidate.providerAccountId));
     if (!identity) throw invalidToken();
 
     const user = await this.markVerified(

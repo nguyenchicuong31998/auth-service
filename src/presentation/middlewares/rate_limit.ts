@@ -5,6 +5,8 @@ const MINUTE = 60_000;
 
 export interface RateLimits {
   login: RequestHandler[];
+  phoneOtp: RequestHandler;
+  phoneLogin: RequestHandler;
   register: RequestHandler;
   publicAuth: RequestHandler;
   resendVerification: RequestHandler;
@@ -46,6 +48,13 @@ export function createRateLimits(enabled: boolean): RateLimits {
         keyGenerator: (req) => `${clientIp(req)}|${bodyField(req, "email")}`,
       }),
     ],
+    phoneOtp: limit({ windowMs: 15 * MINUTE, limit: 5 }),
+    phoneLogin: limit({
+      windowMs: 15 * MINUTE,
+      limit: 10,
+      skipSuccessfulRequests: true,
+      keyGenerator: clientIp,
+    }),
     register: limit({ windowMs: 60 * MINUTE, limit: 10 }),
     publicAuth: limit({ windowMs: 15 * MINUTE, limit: 100 }),
     resendVerification: limit({ windowMs: 15 * MINUTE, limit: 5 }),

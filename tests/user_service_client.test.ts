@@ -76,8 +76,10 @@ describe("UserServiceClient", () => {
       id: USER.id,
       fullName: USER.fullName,
       email: USER.email,
+      phone: null,
       status: USER.status,
       emailVerified: false,
+      phoneVerified: false,
     });
 
     reply = () => [404, { message: "User not found" }];
@@ -89,13 +91,23 @@ describe("UserServiceClient", () => {
 
     reply = () => [409, { message: "Email already exists" }];
     await assert.rejects(
-      client.register({ fullName: "A", email: "a@example.com" }),
+      client.register({
+        fullName: "A",
+        email: "a@example.com",
+        phone: null,
+        registeredFrom: "manual",
+      }),
       DuplicateKeyError,
     );
 
     reply = () => [403, { message: "Missing permission: user:create" }];
     await assert.rejects(
-      client.register({ fullName: "A", email: "a@example.com" }),
+      client.register({
+        fullName: "A",
+        email: "a@example.com",
+        phone: null,
+        registeredFrom: "manual",
+      }),
       (error) => error instanceof UserServiceError && error.status === 503,
     );
   });

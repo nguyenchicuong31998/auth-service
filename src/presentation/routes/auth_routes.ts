@@ -34,6 +34,17 @@ export function createAuthRoutes(
       limits.resendVerification,
       auth.resendVerification,
     )
+    .post("/phone/otp", limits.phoneOtp, auth.requestPhoneOtp)
+    .post(
+      "/phone/login",
+      limits.phoneLogin,
+      audit("auth-phone-login", {
+        captureResponse: false,
+        resourceId: (_req, body) =>
+          (body as { user?: { id?: string } } | undefined)?.user?.id ?? null,
+      }),
+      auth.phoneLogin,
+    )
     .post(
       "/logout",
       authenticate,

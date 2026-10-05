@@ -56,6 +56,7 @@ Những thứ bên ngoài (bcrypt, JWT, user-service) được application dùng
 | `PasswordHasher` | `security/bcrypt_password_hasher.ts` (bcryptjs) | cùng class, cost 4 |
 | `AccessTokenService` | `security/jose_access_token_service.ts` (jose, RS256) | cùng class, khoá sinh trong bộ nhớ |
 | `UserDirectory` | `http/user_service_client.ts` (fetch, timeout 5s) | `FakeUserDirectory` (bộ nhớ) |
+| `SmsSender` | `sms/console_sms_sender.ts` (**in OTP ra console**, thay bằng nhà cung cấp SMS khi lên production) | `FakeSms` (lưu tin nhắn để test đọc OTP) |
 
 ## 3. Code map
 
@@ -70,13 +71,15 @@ auth-service/
 │  ├─ generate_keys.ts                    entry `npm run keys:generate`: sinh khoá RSA 2048 (không ghi đè)
 │  ├─ container.ts                        composition root: createRoutes() · createSeeder()
 │  ├─ domain/
-│  │  ├─ entities/                        1 file = 1 bảng: user_identity · user_device · session (+ isSessionActive)
+│  │  ├─ entities/                        1 file = 1 bảng: user_identity · user_device · session · email_verification_token · phone_verification_otp
 │  │  ├─ repositories/                    interface lưu trữ, 1 file = 1 bảng
-│  │  ├─ ports/                           password_hasher · access_token_service · user_directory
+│  │  ├─ ports/                           password_hasher · access_token_service · user_directory · notification_sender · sms_sender
 │  │  └─ errors/                          duplicate_key_error · user_service_error
 │  ├─ application/
 │  │  ├─ services/
 │  │  │  ├─ auth_service.ts               register · login · refresh · logout · logoutAll · changePassword · authenticate
+│  │  │  ├─ email_verification_service.ts sendVerification · verify · requestResend (link email)
+│  │  │  ├─ phone_otp_service.ts          requestOtp (gửi mã) · consumeCode (kiểm tra + dùng mã)
 │  │  │  ├─ session_service.ts            list · revoke
 │  │  │  └─ user_device_service.ts        list · update (chặn thiết bị → thu hồi session)
 │  │  ├─ seeders/super_admin_seeder.ts    chỉ dùng cho `npm run seed`
@@ -88,7 +91,8 @@ auth-service/
 │  │  ├─ config/env.ts
 │  │  ├─ database/mongodb/                connection · mongo_errors · models/ · repositories/mongoose_<bảng>_repository.ts
 │  │  ├─ security/                        jwt_signer · jose_access_token_service (token user) · service_token_provider (token service) · bcrypt_password_hasher · rsa_key_file
-│  │  └─ http/user_service_client.ts      gọi user-service
+│  │  ├─ sms/console_sms_sender.ts        SmsSender in tin nhắn ra console
+│  │  └─ http/                            user_service_client · notification_client · audit_client
 │  └─ presentation/
 │     ├─ app.ts                           json, /health, /docs, routes, 404, error handler
 │     ├─ middlewares/                     authenticate (Bearer → kiểm tra JWT + session còn hiệu lực) · error_handler
@@ -97,7 +101,8 @@ auth-service/
 │     └─ docs/                            openapi_helpers · openapi_spec
 └─ tests/
    ├─ helpers/test_server.ts              app trên DB *_test riêng + FakeUserDirectory + khoá RSA tạm
-   ├─ auth_api.test.ts                    e2e mọi luồng & trường hợp lỗi
+   ├─ auth_api.test.ts                    e2e mọi luồng & trường hợp lỗi (email + mật khẩu)
+   ├─ phone_login_api.test.ts             đăng nhập SĐT bằng OTP: tạo tài khoản, đăng nhập lại, hết hạn 30s, khoá sau 5 lần sai, dùng 1 lần, chạy song song, TTL index
    ├─ openapi_contract.test.ts            Swagger ↔ API thật (route, mọi status, schema response)
    └─ user_service_client.test.ts         gọi user-service: gửi token service (đúng claim, có cache), map lỗi 404/409/503
 ```
@@ -106,22 +111,27 @@ auth-service/
 
 | Luồng | Xử lý |
 |---|---|
-| Đăng ký | Kiểm tra email chưa có identity → băm mật khẩu → user-service tạo user (`pending`) → tạo identity `manual` |
-| Đăng nhập | Tìm identity → bcrypt (email không tồn tại vẫn chạy bcrypt giả để không lộ email qua thời gian phản hồi) → kiểm tra status user (`active`/`pending`) → thiết bị (dùng lại nếu `device.id` của chính user, chặn nếu `isActive = false`) → thu hồi session cũ của thiết bị → tạo session → cấp token |
+| Đăng ký (email) | Kiểm tra email chưa có identity → băm mật khẩu → user-service tạo user (`registeredFrom = manual`, `pending`) → tạo identity `manual` (email) → gửi link xác minh email |
+| Đăng nhập (email) | Tìm identity `manual` theo email → bcrypt (email không tồn tại vẫn chạy bcrypt giả để không lộ email qua thời gian phản hồi) → kiểm tra status user (`active`/`pending`) → thiết bị (dùng lại nếu `device.id` của chính user, chặn nếu `isActive = false`) → thu hồi session cũ của thiết bị → tạo session → cấp token |
 | Refresh | Tách `sessionId.secret` → session phải còn hiệu lực → hash khớp (không khớp = dùng lại → thu hồi) → thiết bị & user còn hợp lệ → xoay refresh token |
 | Gọi API cần đăng nhập | Middleware `authenticate`: kiểm tra chữ ký/iss/aud/exp **và** session chưa bị thu hồi → logout có hiệu lực ngay trong auth-service |
-| Đổi mật khẩu | Kiểm tra mật khẩu hiện tại → băm mới → thu hồi mọi session khác |
+| Đổi mật khẩu | Kiểm tra mật khẩu hiện tại → băm mới → thu hồi mọi session khác. Tài khoản số điện thoại không có mật khẩu → 400 |
 | Xác minh email | Đăng ký → token 32 byte (lưu SHA-256) → notification-service gửi `email-verification` với `VERIFY_EMAIL_URL?token=…` → frontend gọi `POST /api/auth/verify-email` → user-service `POST /users/{id}/verify-email` (pending → active) → đánh dấu token đã dùng → gửi `welcome` |
 | Gửi lại email | `POST /api/auth/verify-email/resend` luôn 202 (không lộ email); chạy nền; mỗi email tối đa 1 lần / phút; link cũ hết hiệu lực |
+| Xin OTP (SĐT) | `POST /api/auth/phone/otp { phone }` → luôn 202 (không lộ số đã đăng ký) → chạy nền: OTP 6 số (`crypto.randomInt`), lưu `SHA-256(phone:code)` ở `phone_verification_otps` → `SmsSender` gửi đi (hiện là `ConsoleSmsSender`: **in ra console**). Mỗi số chỉ nhận mã mới khi mã trước đã hết hạn; mã cũ mất hiệu lực |
+| Đăng nhập bằng OTP (SĐT) | `POST /api/auth/phone/login { phone, code, fullName?, device }` → kiểm tra mã + **dùng mã nguyên tử** (2 request song song chỉ 1 thành công) → tìm identity `phone_otp` theo số → **chưa có thì tạo tài khoản** (user-service `registeredFrom = phone_otp`, tên = `fullName` hoặc số điện thoại; identity không mật khẩu; `isNewUser = true`) → user-service `POST /users/{id}/verify-phone` nếu chưa xác minh (pending → active) → thiết bị, session, token như đăng nhập email |
+| Hạn & khoá OTP | Hết hạn sau `PHONE_OTP_TTL_SECONDS` (mặc định **30 giây**); MongoDB **tự xoá** OTP hết hạn nhờ TTL index trên `expiresAt` (TTL monitor chạy ~1 phút/lần, nên code vẫn tự kiểm tra `expiresAt`). Sai `PHONE_OTP_MAX_ATTEMPTS` lần (mặc định 5) → OTP bị khoá, phải xin mã mới |
 | Ghi nhận đăng nhập | Sau khi login thành công → user-service `POST /users/{id}/logins` (`lastLoginAt`, `lastLoginProvider`); lỗi chỉ ghi log, không chặn đăng nhập |
 
 ### 4.2 Bảo vệ chống lạm dụng
 
 | Endpoint | Giới hạn (theo IP, in-memory) |
 |---|---|
-| `POST /api/auth/login` | 5 lần **sai** / 15 phút cho mỗi IP + email (đăng nhập đúng không tính) |
+| `POST /api/auth/login` | 5 lần **sai** / 15 phút cho mỗi IP + email · 30 lần sai / 15 phút cho mỗi IP (đăng nhập đúng không tính) |
 | `POST /api/auth/register` | 10 / giờ |
 | `POST /api/auth/refresh`, `/verify-email` | 100 / 15 phút (chung) |
+| `POST /api/auth/phone/otp` | 5 / 15 phút |
+| `POST /api/auth/phone/login` | 10 lần **sai** / 15 phút (kèm khoá mã sau 5 lần sai) |
 | `POST /api/auth/verify-email/resend` | 5 / 15 phút |
 | `POST /oauth/token` | 10 lần **sai** / 15 phút cho mỗi IP + client_id |
 
@@ -157,6 +167,7 @@ thử lại 1s/5s/15s; field chứa password/secret/token/hash bị ẩn). `oldV
 | Resource | Route |
 |---|---|
 | `auth-register` · `auth-verify-email` | userId null (route công khai), newValue = user |
+| `auth-phone-login` | userId null, resourceId = user, **không lưu body** (token) |
 | `auth-login` | userId null, resourceId = user, **không lưu body** (token) |
 | `auth-logout` · `auth-logout-all` · `auth-password` | userId = người dùng, không lưu body |
 | `session` · `device` · `oauth-client` | thu hồi session, sửa thiết bị, quản lý OAuth client (secret bị ẩn) |
@@ -167,7 +178,7 @@ thử lại 1s/5s/15s; field chứa password/secret/token/hash bị ẩn). `oldV
 | Nguồn | Status |
 |---|---|
 | Validator | 400 |
-| Sai email/mật khẩu, token sai/hết hạn, session bị thu hồi | 401 (kèm `WWW-Authenticate: Bearer`) |
+| Sai email/mật khẩu, OTP sai/hết hạn, token sai/hết hạn, session bị thu hồi | 401 (kèm `WWW-Authenticate: Bearer`) |
 | User `inactive`/`blocked`/`banned`, thiết bị bị chặn | 403 |
 | Không tìm thấy session/thiết bị (hoặc của user khác) | 404 |
 | Email đã tồn tại | 409 |
@@ -191,6 +202,8 @@ thử lại 1s/5s/15s; field chứa password/secret/token/hash bị ẩn). `oldV
 | `BCRYPT_ROUNDS` | `12` | |
 | `NOTIFICATION_SERVICE_URL` | `http://localhost:8082` | Gửi email (token service, scope `email:send`) |
 | `VERIFY_EMAIL_URL` | `http://localhost:3000/verify-email` | Trang frontend nhận `?token=` |
+| `PHONE_OTP_TTL_SECONDS` | `30` | Hạn của OTP; MongoDB tự xoá OTP hết hạn |
+| `PHONE_OTP_MAX_ATTEMPTS` | `5` | Số lần nhập sai trước khi OTP bị khoá |
 | `EMAIL_VERIFICATION_TTL_HOURS` | `24` | |
 | `CORS_ORIGINS` | trống | Origin trình duyệt được gọi API (phân cách dấu phẩy) |
 | `TRUST_PROXY` | `false` | `true`, số proxy hoặc subnet khi chạy sau load balancer |
@@ -200,7 +213,9 @@ thử lại 1s/5s/15s; field chứa password/secret/token/hash bị ẩn). `oldV
 
 ## 7. Giới hạn hiện tại & hướng phát triển
 
-- Chỉ đăng nhập email/mật khẩu; `phone_otp`, Google, Facebook, Apple: schema đã sẵn, làm đợt sau.
+- Email: đăng nhập bằng mật khẩu. Số điện thoại: chỉ OTP (không mật khẩu). Chưa có Google, Facebook, Apple (schema đã sẵn), chưa có quên mật khẩu.
+- OTP đang **in ra console** (`ConsoleSmsSender`). Đưa lên production cần cài `SmsSender` với nhà cung cấp SMS thật (eSMS, SpeedSMS, Twilio…).
+- Số điện thoại chỉ được chuẩn hoá bỏ khoảng trắng/`.`/`-`: `0901234567` và `+84901234567` là **hai số khác nhau**.
 - Chưa có quên mật khẩu. Rate limit lưu trong bộ nhớ (cần Redis khi chạy nhiều instance).
 - Chưa có đồng bộ khi user bị xoá ở user-service (bước 4 – API nội bộ hoặc event).
 - Một khoá ký duy nhất; xoay khoá cần hỗ trợ nhiều khoá trong JWKS.

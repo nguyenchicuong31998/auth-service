@@ -42,6 +42,10 @@ import type { NotificationSender } from "./domain/ports/notification_sender.js";
 import { MongooseEmailVerificationTokenRepository } from "./infrastructure/database/mongodb/repositories/mongoose_email_verification_token_repository.js";
 import { NotificationClient } from "./infrastructure/http/notification_client.js";
 import { createRateLimits } from "./presentation/middlewares/rate_limit.js";
+import { PhoneOtpService } from "./application/services/phone_otp_service.js";
+import type { SmsSender } from "./domain/ports/sms_sender.js";
+import { MongoosePhoneVerificationOtpRepository } from "./infrastructure/database/mongodb/repositories/mongoose_phone_verification_otp_repository.js";
+import { ConsoleSmsSender } from "./infrastructure/sms/console_sms_sender.js";
 import type { AuditSink } from "./domain/ports/audit_sink.js";
 import {
   AuditClient,
@@ -56,6 +60,7 @@ export interface ExternalServices {
   passwordHasher: PasswordHasher;
   accessTokens: AccessTokenService;
   notifications: NotificationSender;
+  smsSender: SmsSender;
   auditSink: AuditSink;
 }
 
@@ -98,6 +103,7 @@ function createExternalServices(): ExternalServices {
       env.notificationServiceUrl,
       createServiceTokens(signingKey),
     ),
+    smsSender: new ConsoleSmsSender(),
     auditSink: env.auditServiceUrl
       ? new AuditClient(env.auditServiceUrl, createServiceTokens(signingKey))
       : new DisabledAuditSink(),
@@ -111,6 +117,7 @@ function createRepositories() {
     sessions: new MongooseSessionRepository(),
     oauthClients: new MongooseOAuthClientRepository(),
     verificationTokens: new MongooseEmailVerificationTokenRepository(),
+    phoneOtps: new MongoosePhoneVerificationOtpRepository(),
   };
 }
 
@@ -118,13 +125,20 @@ export function createRoutes(
   external: ExternalServices = createExternalServices(),
   options: RouteOptions = { rateLimit: env.http.rateLimit },
 ): ApiRoute[] {
-  const { identities, devices, sessions, oauthClients, verificationTokens } =
-    createRepositories();
+  const {
+    identities,
+    devices,
+    sessions,
+    oauthClients,
+    verificationTokens,
+    phoneOtps,
+  } = createRepositories();
   const {
     userDirectory,
     passwordHasher,
     accessTokens,
     notifications,
+    smsSender,
     auditSink,
   } = external;
   const audit = createAudit(
@@ -144,6 +158,11 @@ export function createRoutes(
     },
   );
 
+  const phoneOtpService = new PhoneOtpService(phoneOtps, smsSender, {
+    ttlMs: env.phoneOtp.ttlSeconds * 1000,
+    maxAttempts: env.phoneOtp.maxAttempts,
+  });
+
   const authService = new AuthService(
     identities,
     devices,
@@ -153,6 +172,7 @@ export function createRoutes(
     accessTokens,
     env.refreshTokenTtlDays * DAY_MS,
     verificationService,
+    phoneOtpService,
   );
   const sessionService = new SessionService(sessions, devices);
   const userDeviceService = new UserDeviceService(devices, sessions);
@@ -173,7 +193,7 @@ export function createRoutes(
     {
       path: "/api/auth",
       router: createAuthRoutes(
-        new AuthController(authService, verificationService),
+        new AuthController(authService, verificationService, phoneOtpService),
         authenticate,
         limits,
         audit,

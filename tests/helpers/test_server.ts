@@ -9,6 +9,7 @@ import type {
   AuditSink,
 } from "../../src/domain/ports/audit_sink.js";
 import type { NotificationSender } from "../../src/domain/ports/notification_sender.js";
+import type { SmsSender } from "../../src/domain/ports/sms_sender.js";
 import type {
   DirectoryUser,
   NewDirectoryUser,
@@ -52,14 +53,18 @@ export class FakeUserDirectory implements UserDirectory {
   readonly users = new Map<string, DirectoryUser>();
   readonly permissions = new Map<string, string[]>();
   readonly logins: { id: string; provider: string }[] = [];
+  readonly registeredFrom = new Map<string, string>();
   unavailable = false;
 
-  add(data: Partial<DirectoryUser> & { email: string }): DirectoryUser {
+  add(data: Partial<DirectoryUser>): DirectoryUser {
     const user: DirectoryUser = {
       id: randomUUID(),
       fullName: "Test User",
+      email: null,
+      phone: null,
       status: "active",
       emailVerified: false,
+      phoneVerified: false,
       ...data,
     };
     this.users.set(user.id, user);
@@ -72,10 +77,14 @@ export class FakeUserDirectory implements UserDirectory {
 
   async register(data: NewDirectoryUser): Promise<DirectoryUser> {
     this.guard();
-    if ([...this.users.values()].some((user) => user.email === data.email)) {
+    const users = [...this.users.values()];
+    if (data.email && users.some((user) => user.email === data.email)) {
       throw new DuplicateKeyError("email");
     }
-    return this.add({ ...data, status: "pending" });
+    const { registeredFrom, ...fields } = data;
+    const user = this.add({ ...fields, status: "pending" });
+    this.registeredFrom.set(user.id, registeredFrom);
+    return user;
   }
 
   async findById(id: string): Promise<DirectoryUser | null> {
@@ -100,6 +109,25 @@ export class FakeUserDirectory implements UserDirectory {
     const verified: DirectoryUser = {
       ...user,
       emailVerified: true,
+      status: user.status === "pending" ? "active" : user.status,
+    };
+    this.users.set(id, verified);
+    return verified;
+  }
+
+  async verifyPhone(id: string, phone: string): Promise<DirectoryUser> {
+    this.guard();
+    const user = this.users.get(id);
+    if (!user) throw new UserServiceError(404, "User not found");
+    if (user.phone !== phone) {
+      throw new UserServiceError(
+        409,
+        "Phone does not match the user's current phone",
+      );
+    }
+    const verified: DirectoryUser = {
+      ...user,
+      phoneVerified: true,
       status: user.status === "pending" ? "active" : user.status,
     };
     this.users.set(id, verified);
@@ -157,6 +185,22 @@ export class FakeNotifications implements NotificationSender {
   }
 }
 
+export class FakeSms implements SmsSender {
+  readonly sent: { to: string; message: string }[] = [];
+
+  async sendSms(to: string, message: string): Promise<void> {
+    this.sent.push({ to, message });
+  }
+
+  /** The 6-digit OTP of the latest SMS sent to `to`. */
+  otpFor(to: string): string {
+    const sms = [...this.sent].reverse().find((item) => item.to === to);
+    const code = sms?.message.match(/\b(\d{6})\b/)?.[1];
+    if (!code) throw new Error(`No OTP was sent to ${to}`);
+    return code;
+  }
+}
+
 export class CapturingAuditSink implements AuditSink {
   readonly events: AuditEvent[] = [];
 
@@ -179,6 +223,7 @@ export interface TestServer {
   api: Api;
   users: FakeUserDirectory;
   notifications: FakeNotifications;
+  sms: FakeSms;
   audits: CapturingAuditSink;
   privateKey: KeyObject;
   mongoose: typeof import("mongoose").default;
@@ -216,12 +261,14 @@ export async function startTestServer(
   const privateKey = generatePrivateKey();
   const passwordHasher = new BcryptPasswordHasher(4);
   const notifications = new FakeNotifications();
+  const sms = new FakeSms();
   const audits = new CapturingAuditSink();
   const external = {
     userDirectory: users,
     passwordHasher,
     accessTokens: new JoseAccessTokenService(privateKey, JWT_OPTIONS),
     notifications,
+    smsSender: sms,
     auditSink: audits,
   };
 
@@ -267,6 +314,7 @@ export async function startTestServer(
     api,
     users,
     notifications,
+    sms,
     audits,
     privateKey,
     mongoose,

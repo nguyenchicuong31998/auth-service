@@ -20,8 +20,10 @@ const sampleUser = {
   id: SAMPLE_USER_ID,
   fullName: "Super Admin",
   email: "superadmin@gmail.com",
+  phone: null,
   status: "active",
   emailVerified: true,
+  phoneVerified: false,
 };
 
 const sampleTokens = {
@@ -109,6 +111,10 @@ export const openApiSpec = {
     description: [
       "Đăng ký, đăng nhập, refresh token, đăng xuất, đổi mật khẩu, quản lý session & thiết bị.",
       "",
+      "**Hai cách đăng nhập:**",
+      "- **Email + mật khẩu:** `POST /api/auth/register` → (xác minh email) → `POST /api/auth/login`.",
+      "- **Số điện thoại + OTP (không mật khẩu):** `POST /api/auth/phone/otp` → lấy mã trong console auth-service → `POST /api/auth/phone/login`. Số chưa có tài khoản được tạo tự động.",
+      "",
       "**Thử nhanh:** gọi `POST /api/auth/login` với ví dụ *superAdmin* → copy `accessToken` → bấm **Authorize** → dán token.",
       "",
       "Access token là JWT RS256 (mặc định 15 phút). Các service khác kiểm tra token bằng public key ở `GET /.well-known/jwks.json`.",
@@ -116,7 +122,11 @@ export const openApiSpec = {
   },
   servers: [{ url: "/", description: "Server hiện tại" }],
   tags: [
-    { name: "Auth", description: "Đăng ký, đăng nhập, token, mật khẩu" },
+    {
+      name: "Auth",
+      description:
+        "Đăng ký/đăng nhập email + mật khẩu, đăng nhập số điện thoại bằng OTP, token, mật khẩu",
+    },
     { name: "Sessions", description: "Phiên đăng nhập của user hiện tại" },
     { name: "Devices", description: "Thiết bị đã đăng nhập của user hiện tại" },
     { name: "Keys", description: "Public key để kiểm tra JWT" },
@@ -146,20 +156,32 @@ export const openApiSpec = {
       User: {
         type: "object",
         description: "User lấy từ user-service",
-        required: ["id", "fullName", "email", "status", "emailVerified"],
+        required: [
+          "id",
+          "fullName",
+          "email",
+          "phone",
+          "status",
+          "emailVerified",
+          "phoneVerified",
+        ],
         properties: {
           id: { type: "string", format: "uuid" },
           fullName: { type: "string" },
           email: nullableString({ format: "email" }),
+          phone: nullableString({ maxLength: 20 }),
           status: {
             type: "string",
             description: "active | inactive | blocked | banned | pending",
           },
           emailVerified: { type: "boolean" },
+          phoneVerified: { type: "boolean" },
         },
       },
       RegisterRequest: {
         type: "object",
+        description:
+          "Đăng ký bằng **email + mật khẩu**. Số điện thoại không đăng ký ở đây: dùng `POST /api/auth/phone/otp` → `POST /api/auth/phone/login` (tự tạo tài khoản).",
         required: ["fullName", "email", "password"],
         properties: {
           fullName: { type: "string", maxLength: 255 },
@@ -187,10 +209,43 @@ export const openApiSpec = {
       },
       LoginRequest: {
         type: "object",
+        description:
+          "Đăng nhập bằng **email + mật khẩu**. Số điện thoại đăng nhập bằng OTP: `POST /api/auth/phone/login`.",
         required: ["email", "password", "device"],
         properties: {
           email: { type: "string", format: "email" },
           password: { type: "string" },
+          device: ref("DeviceInput"),
+        },
+      },
+      PhoneOtpRequest: {
+        type: "object",
+        required: ["phone"],
+        properties: {
+          phone: {
+            type: "string",
+            maxLength: 20,
+            description:
+              "8–15 chữ số, có thể có `+` ở đầu; khoảng trắng, `.`, `-` được bỏ đi",
+          },
+        },
+      },
+      PhoneLoginRequest: {
+        type: "object",
+        required: ["phone", "code", "device"],
+        properties: {
+          phone: { type: "string", maxLength: 20 },
+          code: {
+            type: "string",
+            pattern: "^[0-9]{6}$",
+            description:
+              "Mã OTP 6 số nhận qua SMS (môi trường dev: in ra console của auth-service)",
+          },
+          fullName: nullableString({
+            maxLength: 255,
+            description:
+              "Chỉ dùng khi số chưa có tài khoản (tạo mới). Bỏ trống → dùng số điện thoại làm tên",
+          }),
           device: ref("DeviceInput"),
         },
       },
@@ -233,6 +288,24 @@ export const openApiSpec = {
             description: "Lưu lại và gửi trong `device.id` ở lần đăng nhập sau",
           },
           user: ref("User"),
+        },
+      },
+      PhoneLoginResult: {
+        type: "object",
+        required: [...tokenPairRequired, "deviceId", "user", "isNewUser"],
+        properties: {
+          ...tokenPairProperties,
+          deviceId: {
+            type: "string",
+            format: "uuid",
+            description: "Lưu lại và gửi trong `device.id` ở lần đăng nhập sau",
+          },
+          user: ref("User"),
+          isNewUser: {
+            type: "boolean",
+            description:
+              "`true` khi số này vừa được tạo tài khoản → frontend có thể mời user cập nhật hồ sơ",
+          },
         },
       },
       Session: {
@@ -363,8 +436,12 @@ export const openApiSpec = {
       post: {
         tags: ["Auth"],
         summary: "Đăng ký bằng email + mật khẩu",
-        description:
+        description: [
           "Tạo user ở user-service (`registeredFrom = manual`, `status = pending`) và lưu mật khẩu (bcrypt) ở bảng `user_identities`. Không trả token: gọi `/login` sau khi đăng ký.",
+          "",
+          "- Gửi email xác minh (link). Xác minh xong user `pending` → `active`. User `pending` vẫn đăng nhập được.",
+          "- **Số điện thoại không đăng ký ở đây** và không có mật khẩu: dùng `POST /api/auth/phone/otp` → `POST /api/auth/phone/login`, tài khoản được tạo tự động.",
+        ].join("\n"),
         requestBody: jsonBody("RegisterRequest", {
           basic: {
             summary: "Đăng ký",
@@ -380,11 +457,13 @@ export const openApiSpec = {
             id: "2e98e54c-aaf6-4e5b-a596-1d384a93487e",
             fullName: "Nguyen Van A",
             email: "nguyenvana@example.com",
+            phone: null,
             status: "pending",
             emailVerified: false,
+            phoneVerified: false,
           }),
           400: errorResponse("Dữ liệu không hợp lệ", {
-            missing: "password is required",
+            missing: "email is required",
             email: "email is invalid",
             shortPassword: "password must be at least 8 characters",
           }),
@@ -402,6 +481,7 @@ export const openApiSpec = {
         description: [
           "Trả access token + refresh token và tạo một session.",
           "",
+          "- Chỉ dành cho tài khoản email. Số điện thoại đăng nhập bằng OTP: `POST /api/auth/phone/login`.",
           "- Lần đầu trên một thiết bị: bỏ trống `device.id` → tạo thiết bị mới, trả về `deviceId`.",
           "- Lần sau: gửi `device.id = deviceId` → dùng lại thiết bị; session cũ của thiết bị đó bị thu hồi (`replaced`).",
           "- User `pending` vẫn đăng nhập được; `inactive`/`blocked`/`banned` → 403.",
@@ -444,6 +524,7 @@ export const openApiSpec = {
           }),
           400: errorResponse("Dữ liệu không hợp lệ", {
             missing: "device is required",
+            noEmail: "email is required",
             deviceType: "device.deviceType must be one of: WEB, IOS, ANDROID",
           }),
           401: errorResponse("Sai email hoặc mật khẩu", {
@@ -452,6 +533,105 @@ export const openApiSpec = {
           403: errorResponse("Tài khoản hoặc thiết bị bị chặn", {
             blocked: "Account is blocked",
             device: "Device is disabled",
+          }),
+          503: userServiceUnavailable,
+        },
+      },
+    },
+    "/api/auth/phone/otp": {
+      post: {
+        tags: ["Auth"],
+        summary: "Bước 1 – Xin mã OTP đăng nhập bằng số điện thoại",
+        description: [
+          "Gửi mã OTP 6 số tới số điện thoại. **Môi trường hiện tại chưa nối SMS: mã được in ra console của auth-service**, dạng:",
+          "",
+          "```",
+          "[SMS -> 0901234567] Ma dang nhap MS cua ban la 482913. Ma het han sau 30 giay.",
+          "```",
+          "",
+          "- Luôn trả **202** (kể cả số chưa có tài khoản) – không lộ số nào đã đăng ký. Gửi chạy nền.",
+          "- Mã hết hạn sau `PHONE_OTP_TTL_SECONDS` (mặc định **30 giây**), dùng một lần. MongoDB **tự xoá** mã hết hạn (TTL index trên `expiresAt`).",
+          "- Mỗi số chỉ nhận mã mới khi mã trước đã hết hạn; mã cũ mất hiệu lực khi có mã mới.",
+          "- Tiếp theo: gọi `POST /api/auth/phone/login` với mã nhận được.",
+        ].join("\n"),
+        requestBody: jsonBody("PhoneOtpRequest", {
+          basic: { summary: "Xin mã", value: { phone: "0901234567" } },
+          formatted: {
+            summary: "Số có khoảng trắng / gạch (tự chuẩn hoá)",
+            value: { phone: "0901 234-567" },
+          },
+        }),
+        responses: {
+          202: { description: "Đã nhận yêu cầu, mã được gửi (in ra console)" },
+          400: errorResponse("Số điện thoại không hợp lệ", {
+            missing: "phone is required",
+            invalid: "phone is invalid",
+          }),
+        },
+      },
+    },
+    "/api/auth/phone/login": {
+      post: {
+        tags: ["Auth"],
+        summary: "Bước 2 – Nhập OTP để đăng nhập (không cần mật khẩu)",
+        description: [
+          "Mã đúng → **đăng nhập luôn**, trả access token + refresh token như `/login`.",
+          "",
+          "- Số **chưa có tài khoản** → tự tạo user (`registeredFrom = phone_otp`), `isNewUser = true`. `fullName` lấy từ body, bỏ trống thì dùng số điện thoại.",
+          "- Số **đã có tài khoản** → đăng nhập vào tài khoản đó, `isNewUser = false` (`fullName` bị bỏ qua).",
+          "- Đăng nhập thành công = đã chứng minh sở hữu số → `phoneVerified = true`, user `pending` → `active`.",
+          "- Sai mã `PHONE_OTP_MAX_ATTEMPTS` lần (mặc định 5) → mã bị khoá, phải xin mã mới.",
+          "- Tài khoản số điện thoại **không có mật khẩu**: không dùng được `/login` hay `PUT /password`.",
+        ].join("\n"),
+        requestBody: jsonBody("PhoneLoginRequest", {
+          newUser: {
+            summary: "Số mới – tạo tài khoản và đăng nhập",
+            value: {
+              phone: "0901234567",
+              code: "482913",
+              fullName: "Tran Thi B",
+              device: loginDevice,
+            },
+          },
+          existingUser: {
+            summary: "Số đã có tài khoản",
+            value: {
+              phone: "0901234567",
+              code: "482913",
+              device: { id: SAMPLE_DEVICE_ID, ...loginDevice },
+            },
+          },
+        }),
+        responses: {
+          200: jsonResponse("Đăng nhập thành công", "PhoneLoginResult", {
+            ...sampleTokens,
+            deviceId: SAMPLE_DEVICE_ID,
+            user: {
+              ...sampleUser,
+              fullName: "Tran Thi B",
+              email: null,
+              phone: "0901234567",
+              emailVerified: false,
+              phoneVerified: true,
+            },
+            isNewUser: true,
+          }),
+          400: errorResponse("Dữ liệu không hợp lệ", {
+            missing: "code is required",
+            format: "code must be 6 digits",
+            phone: "phone is invalid",
+            device: "device is required",
+          }),
+          401: errorResponse("Mã OTP sai, hết hạn hoặc đã dùng", {
+            invalid: "Invalid or expired OTP",
+            tooMany: "Too many wrong OTP attempts, request a new code",
+          }),
+          403: errorResponse("Tài khoản hoặc thiết bị bị chặn", {
+            blocked: "Account is blocked",
+            device: "Device is disabled",
+          }),
+          409: errorResponse("Số không còn thuộc tài khoản", {
+            moved: "This phone number no longer belongs to the account",
           }),
           503: userServiceUnavailable,
         },
@@ -683,13 +863,16 @@ const unsupportedMediaType = errorResponse(
 );
 
 const RATE_LIMITED: Record<string, string> = {
-  "post /api/auth/login": "5 lần đăng nhập sai / 15 phút cho mỗi IP + email",
+  "post /api/auth/login":
+    "5 lần sai / 15 phút cho mỗi IP + email; 30 lần sai / 15 phút cho mỗi IP",
   "post /api/auth/register": "10 lần / giờ cho mỗi IP",
   "post /api/auth/refresh":
     "100 lần / 15 phút cho mỗi IP (chung với verify-email)",
   "post /api/auth/verify-email":
     "100 lần / 15 phút cho mỗi IP (chung với refresh)",
   "post /api/auth/verify-email/resend": "5 lần / 15 phút cho mỗi IP",
+  "post /api/auth/phone/otp": "5 lần / 15 phút cho mỗi IP",
+  "post /api/auth/phone/login": "10 lần sai / 15 phút cho mỗi IP",
   "post /oauth/token": "10 lần sai / 15 phút cho mỗi IP + client_id",
 };
 

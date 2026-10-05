@@ -6,6 +6,7 @@ import AjvModule from "ajv";
 import addFormatsModule from "ajv-formats";
 import {
   FakeNotifications,
+  FakeSms,
   FakeUserDirectory,
   JWT_OPTIONS,
   startTestServer,
@@ -128,6 +129,7 @@ describe("OpenAPI document", () => {
       passwordHasher: new BcryptPasswordHasher(4),
       accessTokens: new JoseAccessTokenService(server.privateKey, JWT_OPTIONS),
       notifications: new FakeNotifications(),
+      smsSender: new FakeSms(),
       auditSink: { record: () => undefined },
     });
 
@@ -541,6 +543,97 @@ describe("every documented response is real", () => {
     await call("post", verify, 200, { body: { token: fresh } });
   });
 
+  it("phone OTP login", async () => {
+    const otpFor = async (phone: string, count = 1) => {
+      for (let i = 0; i < 100; i += 1) {
+        const sent = server.sms.sent.filter((sms) => sms.to === phone);
+        if (sent.length >= count) return server.sms.otpFor(phone);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error(`No OTP sent to ${phone}`);
+    };
+    const otp = "/api/auth/phone/otp";
+    const login = "/api/auth/phone/login";
+    const phone = "0911000001";
+
+    await call("post", otp, 400, { body: { phone: "bad" } });
+    await call("post", otp, 202, { body: { phone } });
+    const code = await otpFor(phone);
+
+    await call("post", login, 400, {
+      body: { phone, code: "12", device: WEB_DEVICE },
+    });
+    await call("post", login, 401, {
+      body: {
+        phone,
+        code: code === "000000" ? "111111" : "000000",
+        device: WEB_DEVICE,
+      },
+    });
+    server.users.unavailable = true;
+    try {
+      await call("post", login, 503, {
+        body: { phone, code, device: WEB_DEVICE },
+      });
+    } finally {
+      server.users.unavailable = false;
+    }
+
+    const blockedPhone = "0911000002";
+    await call("post", otp, 202, { body: { phone: blockedPhone } });
+    const first = await call("post", login, 200, {
+      body: {
+        phone: blockedPhone,
+        code: await otpFor(blockedPhone),
+        fullName: "Phone Contract",
+        device: WEB_DEVICE,
+      },
+    });
+    assert.equal(first.isNewUser, true);
+    server.users.setStatus(first.user.id, "blocked");
+    const otps = server.mongoose.connection.collection(
+      "phone_verification_otps",
+    );
+    const expire = (target: string) =>
+      otps.updateMany(
+        { phone: target },
+        { $set: { createdAt: new Date(Date.now() - 31_000) } },
+      );
+    await expire(blockedPhone);
+    await call("post", otp, 202, { body: { phone: blockedPhone } });
+    await call("post", login, 403, {
+      body: {
+        phone: blockedPhone,
+        code: await otpFor(blockedPhone, 2),
+        device: WEB_DEVICE,
+      },
+    });
+
+    const movedPhone = "0911000003";
+    await call("post", otp, 202, { body: { phone: movedPhone } });
+    const moved = await call("post", login, 200, {
+      body: {
+        phone: movedPhone,
+        code: await otpFor(movedPhone),
+        device: WEB_DEVICE,
+      },
+    });
+    server.users.users.set(moved.user.id, {
+      ...server.users.users.get(moved.user.id)!,
+      phone: "0911999999",
+      phoneVerified: false,
+    });
+    await expire(movedPhone);
+    await call("post", otp, 202, { body: { phone: movedPhone } });
+    await call("post", login, 409, {
+      body: {
+        phone: movedPhone,
+        code: await otpFor(movedPhone, 2),
+        device: WEB_DEVICE,
+      },
+    });
+  });
+
   it("429 on every rate-limited endpoint", async () => {
     const limited = await server.startRateLimited();
     const hammer = async (
@@ -566,6 +659,12 @@ describe("every documented response is real", () => {
         "/api/auth/verify-email/resend",
         { email: "nobody@example.com" },
         5,
+      );
+      await hammer("/api/auth/phone/otp", { phone: "0900000000" }, 5);
+      await hammer(
+        "/api/auth/phone/login",
+        { phone: "0900000000", code: "000000", device: WEB_DEVICE },
+        10,
       );
       await hammer(
         "/oauth/token",

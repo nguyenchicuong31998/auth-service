@@ -16,19 +16,31 @@ const unavailable = () =>
   new UserServiceError(503, "User service is unavailable");
 
 function toDirectoryUser(body: unknown): DirectoryUser {
-  const { id, fullName, email, status, emailVerifiedAt } = body as {
+  const {
+    id,
+    fullName,
+    email,
+    phone,
+    status,
+    emailVerifiedAt,
+    phoneVerifiedAt,
+  } = body as {
     id: Uuid;
     fullName: string;
     email: string | null;
+    phone: string | null;
     status: string;
     emailVerifiedAt: string | null;
+    phoneVerifiedAt: string | null;
   };
   return {
     id,
     fullName,
     email: email ?? null,
+    phone: phone ?? null,
     status,
     emailVerified: Boolean(emailVerifiedAt),
+    phoneVerified: Boolean(phoneVerifiedAt),
   };
 }
 
@@ -39,10 +51,7 @@ export class UserServiceClient implements UserDirectory {
   ) {}
 
   async register(data: NewDirectoryUser): Promise<DirectoryUser> {
-    const res = await this.request("POST", "/api/users", {
-      ...data,
-      registeredFrom: "manual",
-    });
+    const res = await this.request("POST", "/api/users", data);
     if (res.status === 409) throw new DuplicateKeyError("email");
     if (res.status === 400) {
       const { message } = (await res.json()) as { message: string };
@@ -72,6 +81,19 @@ export class UserServiceClient implements UserDirectory {
       "POST",
       `/api/users/${encodeURIComponent(id)}/verify-email`,
       { email },
+    );
+    if (res.status === 404 || res.status === 409) {
+      const { message } = (await res.json()) as { message: string };
+      throw new UserServiceError(res.status, message);
+    }
+    return toDirectoryUser(await this.json(res));
+  }
+
+  async verifyPhone(id: Uuid, phone: string): Promise<DirectoryUser> {
+    const res = await this.request(
+      "POST",
+      `/api/users/${encodeURIComponent(id)}/verify-phone`,
+      { phone },
     );
     if (res.status === 404 || res.status === 409) {
       const { message } = (await res.json()) as { message: string };

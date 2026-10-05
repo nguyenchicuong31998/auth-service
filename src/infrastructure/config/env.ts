@@ -53,6 +53,10 @@ export const env = {
     optional("NOTIFICATION_SERVICE_URL") ?? "http://localhost:8082",
   verifyEmailUrl: url("VERIFY_EMAIL_URL", "http://localhost:3000/verify-email"),
   emailVerificationTtlHours: positiveInt("EMAIL_VERIFICATION_TTL_HOURS", 24),
+  phoneOtp: {
+    ttlSeconds: positiveInt("PHONE_OTP_TTL_SECONDS", 30),
+    maxAttempts: positiveInt("PHONE_OTP_MAX_ATTEMPTS", 5),
+  },
   http: {
     corsOrigins: list("CORS_ORIGINS"),
     trustProxy: trustProxy(),

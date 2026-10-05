@@ -5,8 +5,10 @@ export interface DirectoryUser {
   id: Uuid;
   fullName: string;
   email: string | null;
+  phone: string | null;
   status: string;
   emailVerified: boolean;
+  phoneVerified: boolean;
 }
 
 export interface UserAccess {
@@ -16,7 +18,9 @@ export interface UserAccess {
 
 export interface NewDirectoryUser {
   fullName: string;
-  email: string;
+  email: string | null;
+  phone: string | null;
+  registeredFrom: Extract<AuthProvider, "manual" | "phone_otp">;
 }
 
 export interface UserDirectory {
@@ -25,5 +29,6 @@ export interface UserDirectory {
   findByEmail(email: string): Promise<DirectoryUser | null>;
   getAccess(id: Uuid): Promise<UserAccess | null>;
   verifyEmail(id: Uuid, email: string): Promise<DirectoryUser>;
+  verifyPhone(id: Uuid, phone: string): Promise<DirectoryUser>;
   recordLogin(id: Uuid, provider: AuthProvider): Promise<void>;
 }
