@@ -181,6 +181,8 @@ Token xác minh email, dùng một lần. Không có API CRUD riêng – chỉ d
 | `id` | UUID | PK |
 | `userId` | UUID | → `users.id` |
 | `tokenHash` | VARCHAR(255) | Unique – SHA-256 của token gốc; token gốc chỉ nằm trong email |
+| `email` | VARCHAR(255) | Nullable – chỉ có ở link **thêm email** (`POST /api/auth/me/email`): email sẽ được gắn khi bấm link |
+| `passwordHash` | VARCHAR(255) | Nullable – bcrypt của mật khẩu đi kèm email được thêm; **bị xoá (null) khi token được dùng hoặc bị thay** |
 | `expiresAt` | TIMESTAMP | `createdAt + EMAIL_VERIFICATION_TTL_HOURS` (mặc định 24h) |
 | `consumedAt` | TIMESTAMP | Nullable – ghi khi đăng nhập thành công **hoặc** khi bị thay bởi mã mới |
 | `createdAt` / `updatedAt` | TIMESTAMP | |
@@ -207,6 +209,19 @@ Mã OTP 6 số để **đăng nhập bằng số điện thoại**. Gắn với 
 
 Index: `(phone, createdAt desc)` · **TTL** `expiresAt` (`expireAfterSeconds: 0`) → MongoDB **tự xoá** OTP ngay khi hết hạn.
 TTL monitor của MongoDB chạy khoảng 60 giây/lần, nên bản ghi có thể còn thêm tối đa ~1 phút; code luôn kiểm tra `expiresAt` nên mã đã hết hạn không bao giờ dùng được.
+
+### 3.7 `phone_otp_events`
+
+Nhật ký theo số điện thoại để giới hạn gửi mã và dò mã. OTP tự xoá sau 30 giây nên số lần được đếm ở đây.
+
+| Cột | Kiểu | Mô tả |
+|---|---|---|
+| `id` | UUID | PK |
+| `phone` | VARCHAR(20) | Số đã chuẩn hoá |
+| `type` | ENUM | `sent` (đã gửi một mã) · `failed` (nhập sai một mã) |
+| `createdAt` | TIMESTAMP | |
+
+Index: `(phone, type, createdAt desc)` · **TTL** `createdAt` 24 giờ → MongoDB tự xoá.
 
 ## 4. Refresh token
 

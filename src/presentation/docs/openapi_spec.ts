@@ -127,6 +127,11 @@ export const openApiSpec = {
       description:
         "Đăng ký/đăng nhập email + mật khẩu, đăng nhập số điện thoại bằng OTP, token, mật khẩu",
     },
+    {
+      name: "Account",
+      description:
+        "Liên kết cách đăng nhập: thêm số điện thoại (OTP) hoặc email + mật khẩu vào tài khoản đang đăng nhập",
+    },
     { name: "Sessions", description: "Phiên đăng nhập của user hiện tại" },
     { name: "Devices", description: "Thiết bị đã đăng nhập của user hiện tại" },
     { name: "Keys", description: "Public key để kiểm tra JWT" },
@@ -228,6 +233,36 @@ export const openApiSpec = {
             description:
               "8–15 chữ số, có thể có `+` ở đầu; khoảng trắng, `.`, `-` được bỏ đi",
           },
+        },
+      },
+      LinkPhoneRequest: {
+        type: "object",
+        required: ["phone", "code"],
+        properties: {
+          phone: { type: "string", maxLength: 20 },
+          code: { type: "string", pattern: "^[0-9]{6}$" },
+        },
+      },
+      LinkEmailRequest: {
+        type: "object",
+        required: ["email", "password"],
+        properties: {
+          email: { type: "string", format: "email", maxLength: 255 },
+          password: {
+            type: "string",
+            minLength: 8,
+            description: "Mật khẩu để đăng nhập bằng email sau này",
+          },
+        },
+      },
+      LinkedIdentity: {
+        type: "object",
+        required: ["method", "value", "linkedAt", "lastUsedAt"],
+        properties: {
+          method: { type: "string", enum: ["email", "phone"] },
+          value: { type: "string" },
+          linkedAt: { type: "string", format: "date-time" },
+          lastUsedAt: nullableString({ format: "date-time" }),
         },
       },
       PhoneLoginRequest: {
@@ -466,6 +501,7 @@ export const openApiSpec = {
             missing: "email is required",
             email: "email is invalid",
             shortPassword: "password must be at least 8 characters",
+            unknown: "Unknown field: phone",
           }),
           409: errorResponse("Email đã được đăng ký", {
             duplicate: "Email already exists",
@@ -525,6 +561,7 @@ export const openApiSpec = {
           400: errorResponse("Dữ liệu không hợp lệ", {
             missing: "device is required",
             noEmail: "email is required",
+            unknown: "Unknown field: phone",
             deviceType: "device.deviceType must be one of: WEB, IOS, ANDROID",
           }),
           401: errorResponse("Sai email hoặc mật khẩu", {
@@ -552,6 +589,7 @@ export const openApiSpec = {
           "- Luôn trả **202** (kể cả số chưa có tài khoản) – không lộ số nào đã đăng ký. Gửi chạy nền.",
           "- Mã hết hạn sau `PHONE_OTP_TTL_SECONDS` (mặc định **30 giây**), dùng một lần. MongoDB **tự xoá** mã hết hạn (TTL index trên `expiresAt`).",
           "- Mỗi số chỉ nhận mã mới khi mã trước đã hết hạn; mã cũ mất hiệu lực khi có mã mới.",
+          "- Mỗi số tối đa `PHONE_OTP_MAX_SENDS_PER_HOUR` (5) mã / giờ và `PHONE_OTP_MAX_SENDS_PER_DAY` (10) mã / ngày, tính trên mọi IP. Vượt giới hạn vẫn trả 202 nhưng **không gửi** (chống spam SMS).",
           "- Tiếp theo: gọi `POST /api/auth/phone/login` với mã nhận được.",
         ].join("\n"),
         requestBody: jsonBody("PhoneOtpRequest", {
@@ -580,8 +618,10 @@ export const openApiSpec = {
           "- Số **chưa có tài khoản** → tự tạo user (`registeredFrom = phone_otp`), `isNewUser = true`. `fullName` lấy từ body, bỏ trống thì dùng số điện thoại.",
           "- Số **đã có tài khoản** → đăng nhập vào tài khoản đó, `isNewUser = false` (`fullName` bị bỏ qua).",
           "- Đăng nhập thành công = đã chứng minh sở hữu số → `phoneVerified = true`, user `pending` → `active`.",
-          "- Sai mã `PHONE_OTP_MAX_ATTEMPTS` lần (mặc định 5) → mã bị khoá, phải xin mã mới.",
+          "- Sai mã `PHONE_OTP_MAX_ATTEMPTS` lần (mặc định 5) → mã bị khoá, phải xin mã mới. Giới hạn đúng **kể cả khi gửi nhiều lần đoán song song**.",
+          "- Một số sai quá `PHONE_OTP_MAX_FAILURES_PER_DAY` lần (mặc định 20) trong 24 giờ, tính trên mọi mã và mọi IP → **429**, tạm khoá đăng nhập OTP của số đó.",
           "- Tài khoản số điện thoại **không có mật khẩu**: không dùng được `/login` hay `PUT /password`.",
+          "- Tài khoản **có role hoặc quyền** (nhân viên, admin) **không được đăng nhập bằng OTP** → 403, phải dùng email + mật khẩu (chiếm được SIM không có nghĩa là chiếm được quyền quản trị).",
         ].join("\n"),
         requestBody: jsonBody("PhoneLoginRequest", {
           newUser: {
@@ -626,10 +666,15 @@ export const openApiSpec = {
             invalid: "Invalid or expired OTP",
             tooMany: "Too many wrong OTP attempts, request a new code",
           }),
-          403: errorResponse("Tài khoản hoặc thiết bị bị chặn", {
-            blocked: "Account is blocked",
-            device: "Device is disabled",
-          }),
+          403: errorResponse(
+            "Tài khoản bị chặn, thiết bị bị chặn hoặc tài khoản có quyền quản trị",
+            {
+              blocked: "Account is blocked",
+              device: "Device is disabled",
+              privileged:
+                "Accounts with roles or permissions must sign in with email and password",
+            },
+          ),
           409: errorResponse("Số không còn thuộc tài khoản", {
             moved: "This phone number no longer belongs to the account",
           }),
@@ -642,7 +687,7 @@ export const openApiSpec = {
         tags: ["Auth"],
         summary: "Xác minh email bằng token trong email",
         description:
-          "Frontend lấy `token` từ link (`VERIFY_EMAIL_URL?token=...`) rồi gọi API này. Token dùng một lần, hết hạn sau `EMAIL_VERIFICATION_TTL_HOURS` (mặc định 24h). Thành công: user `pending` → `active` và gửi email `welcome`.",
+          "Frontend lấy `token` từ link (`VERIFY_EMAIL_URL?token=...`) rồi gọi API này. Token dùng một lần, hết hạn sau `EMAIL_VERIFICATION_TTL_HOURS` (mặc định 24h). Dùng cho cả hai loại link: **đăng ký** (user `pending` → `active`, gửi email `welcome`) và **thêm email** (`POST /api/auth/me/email`: gắn email + mật khẩu vào tài khoản).",
         requestBody: jsonBody("VerifyEmailRequest", {
           basic: {
             summary: "Token từ link",
@@ -659,9 +704,14 @@ export const openApiSpec = {
             invalid: "Invalid or expired verification token",
             missing: "token is required",
           }),
-          409: errorResponse("Email đã đổi sau khi gửi link", {
-            changed: "The email has changed since this link was sent",
-          }),
+          409: errorResponse(
+            "Email đã đổi, hoặc email (khi thêm vào tài khoản) đã thuộc tài khoản khác",
+            {
+              changed: "The email has changed since this link was sent",
+              taken: "This email is already used by another account",
+              different: "This account already has a different email",
+            },
+          ),
           503: userServiceUnavailable,
         },
       },
@@ -763,6 +813,141 @@ export const openApiSpec = {
             },
           ),
           401: unauthorized,
+        },
+      },
+    },
+    "/api/auth/me/identities": {
+      get: {
+        tags: ["Account"],
+        summary: "Các cách đăng nhập đã liên kết",
+        description:
+          "Liệt kê email (`method = email`, đăng nhập bằng mật khẩu) và số điện thoại (`method = phone`, đăng nhập bằng OTP) đang gắn với tài khoản. Dùng cho trang cá nhân: hiện nút **Thêm số điện thoại** / **Thêm email** khi còn thiếu.",
+        security: [{ bearerAuth: [] }],
+        responses: {
+          200: jsonResponse(
+            "Danh sách cách đăng nhập",
+            "LinkedIdentity",
+            [
+              {
+                method: "email",
+                value: "nguyenvana@example.com",
+                linkedAt: "2026-10-04T04:24:11.671Z",
+                lastUsedAt: "2026-10-05T01:00:00.000Z",
+              },
+              {
+                method: "phone",
+                value: "0901234567",
+                linkedAt: "2026-10-05T02:00:00.000Z",
+                lastUsedAt: null,
+              },
+            ],
+            true,
+          ),
+          401: unauthorized,
+        },
+      },
+    },
+    "/api/auth/me/phone/otp": {
+      post: {
+        tags: ["Account"],
+        summary: "Thêm số điện thoại – Bước 1: gửi OTP tới số mới",
+        description: [
+          "Gửi OTP tới số muốn gắn vào tài khoản đang đăng nhập (dev: in ra console). Mã có cùng quy tắc với đăng nhập OTP: 30 giây, sai 5 lần thì khoá, giới hạn theo số.",
+          "",
+          "- Số đã thuộc tài khoản khác → 409 (không tự gộp tài khoản).",
+          "- Tài khoản đã có số khác → 409 (số đã gắn không đổi được).",
+          "- Tiếp theo: `POST /api/auth/me/phone`.",
+        ].join("\n"),
+        security: [{ bearerAuth: [] }],
+        requestBody: jsonBody("PhoneOtpRequest", {
+          basic: { summary: "Gửi mã", value: { phone: "0901234567" } },
+        }),
+        responses: {
+          202: { description: "Đã gửi mã (in ra console)" },
+          400: errorResponse("Số điện thoại không hợp lệ", {
+            invalid: "phone is invalid",
+            unknown: "Unknown field: email",
+          }),
+          401: unauthorized,
+          409: errorResponse("Không thể gắn số này", {
+            taken: "This phone number is already used by another account",
+            hasPhone: "This account already has a phone number",
+          }),
+        },
+      },
+    },
+    "/api/auth/me/phone": {
+      post: {
+        tags: ["Account"],
+        summary: "Thêm số điện thoại – Bước 2: nhập OTP để gắn số",
+        description: [
+          "Mã đúng → số được gắn vào tài khoản đang đăng nhập và đánh dấu đã xác minh. Từ giờ đăng nhập bằng OTP với số này sẽ vào **đúng tài khoản này** (không tạo tài khoản mới).",
+          "",
+          "- Tài khoản có role/quyền vẫn gắn được số, nhưng **không đăng nhập bằng OTP** được (403 ở `/phone/login`).",
+          "- Gọi lại với số đã gắn của chính mình: 200, không đổi gì.",
+        ].join("\n"),
+        security: [{ bearerAuth: [] }],
+        requestBody: jsonBody("LinkPhoneRequest", {
+          basic: {
+            summary: "Nhập mã",
+            value: { phone: "0901234567", code: "482913" },
+          },
+        }),
+        responses: {
+          200: jsonResponse("User sau khi gắn số", "User", {
+            ...sampleUser,
+            phone: "0901234567",
+            phoneVerified: true,
+          }),
+          400: errorResponse("Dữ liệu không hợp lệ", {
+            format: "code must be 6 digits",
+            missing: "code is required",
+          }),
+          401: errorResponse("Thiếu token, hoặc OTP sai / hết hạn", {
+            missingToken: "Missing bearer token",
+            invalidOtp: "Invalid or expired OTP",
+            tooMany: "Too many wrong OTP attempts, request a new code",
+          }),
+          409: errorResponse("Không thể gắn số này", {
+            taken: "This phone number is already used by another account",
+            hasPhone: "This account already has a phone number",
+            different: "This account already has a different phone number",
+          }),
+          503: userServiceUnavailable,
+        },
+      },
+    },
+    "/api/auth/me/email": {
+      post: {
+        tags: ["Account"],
+        summary: "Thêm email + mật khẩu cho tài khoản số điện thoại",
+        description: [
+          "Gửi link xác minh tới email mới. Email **chỉ được gắn vào tài khoản sau khi bấm link** (`POST /api/auth/verify-email`) – tránh việc ai đó gắn email của người khác vào tài khoản của mình. Mật khẩu được băm (bcrypt) và lưu tạm cùng link; sau khi xác minh, đăng nhập được bằng email + mật khẩu.",
+          "",
+          "- Email đã thuộc tài khoản khác → 409.",
+          "- Tài khoản đã có email → 409 (email đã gắn không đổi được).",
+          "- Gửi lại: gọi lại API này; link cũ mất hiệu lực.",
+        ].join("\n"),
+        security: [{ bearerAuth: [] }],
+        requestBody: jsonBody("LinkEmailRequest", {
+          basic: {
+            summary: "Thêm email",
+            value: { email: "tranthib@example.com", password: "Password@123" },
+          },
+        }),
+        responses: {
+          202: { description: "Đã gửi link xác minh tới email mới" },
+          400: errorResponse("Dữ liệu không hợp lệ", {
+            email: "email is invalid",
+            shortPassword: "password must be at least 8 characters",
+          }),
+          401: unauthorized,
+          409: errorResponse("Không thể gắn email này", {
+            taken: "This email is already used by another account",
+            hasEmail: "This account already has an email",
+            different: "This account already has a different email",
+          }),
+          503: userServiceUnavailable,
         },
       },
     },
@@ -871,8 +1056,14 @@ const RATE_LIMITED: Record<string, string> = {
   "post /api/auth/verify-email":
     "100 lần / 15 phút cho mỗi IP (chung với refresh)",
   "post /api/auth/verify-email/resend": "5 lần / 15 phút cho mỗi IP",
-  "post /api/auth/phone/otp": "5 lần / 15 phút cho mỗi IP",
-  "post /api/auth/phone/login": "10 lần sai / 15 phút cho mỗi IP",
+  "post /api/auth/phone/otp":
+    "5 lần / 15 phút cho mỗi IP; mỗi số tối đa 5 mã / giờ và 10 mã / ngày (vượt thì vẫn trả 202 nhưng không gửi)",
+  "post /api/auth/me/phone/otp": "chung giới hạn với /api/auth/phone/otp",
+  "post /api/auth/me/phone": "chung giới hạn với /api/auth/phone/login",
+  "post /api/auth/me/email":
+    "chung giới hạn với /api/auth/verify-email/resend (5 lần / 15 phút cho mỗi IP)",
+  "post /api/auth/phone/login":
+    "10 lần sai / 15 phút cho mỗi IP; mỗi số tối đa 20 lần sai / ngày",
   "post /oauth/token": "10 lần sai / 15 phút cho mỗi IP + client_id",
 };
 

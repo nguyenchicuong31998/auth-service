@@ -4,7 +4,8 @@ import type { EmailVerificationToken } from "../entities/email_verification_toke
 export type NewEmailVerificationToken = Pick<
   EmailVerificationToken,
   "userId" | "tokenHash" | "expiresAt"
->;
+> &
+  Partial<Pick<EmailVerificationToken, "email" | "passwordHash">>;
 
 export interface EmailVerificationTokenRepository {
   create(data: NewEmailVerificationToken): Promise<EmailVerificationToken>;

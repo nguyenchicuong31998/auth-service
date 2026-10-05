@@ -4,6 +4,7 @@ import helmet from "helmet";
 import swaggerUi from "swagger-ui-express";
 import { openApiSpec } from "./docs/openapi_spec.js";
 import { errorHandler, notFoundHandler } from "./middlewares/error_handler.js";
+import { createRequestLogger } from "./middlewares/request_logger.js";
 
 export interface ApiRoute {
   path: string;
@@ -13,16 +14,22 @@ export interface ApiRoute {
 export interface HttpOptions {
   corsOrigins?: string[];
   trustProxy?: boolean | number | string;
+  logRequests?: boolean;
 }
 
 export function createApp(
   routes: ApiRoute[],
   isDbConnected: () => boolean,
-  { corsOrigins = [], trustProxy = false }: HttpOptions = {},
+  {
+    corsOrigins = [],
+    trustProxy = false,
+    logRequests = false,
+  }: HttpOptions = {},
 ): Express {
   const app = express();
 
   app.set("trust proxy", trustProxy);
+  if (logRequests) app.use(createRequestLogger("auth-service"));
   app.use(helmet());
   app.use(cors({ origin: corsOrigins, credentials: true }));
 

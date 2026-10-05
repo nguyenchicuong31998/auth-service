@@ -634,6 +634,104 @@ describe("every documented response is real", () => {
     });
   });
 
+  it("account linking", async () => {
+    const otpFor = async (phone: string, count = 1) => {
+      for (let i = 0; i < 100; i += 1) {
+        const sent = server.sms.sent.filter((sms) => sms.to === phone);
+        if (sent.length >= count) return server.sms.otpFor(phone);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error("No OTP sent to " + phone);
+    };
+    const expire = (number: string) =>
+      server.mongoose.connection
+        .collection("phone_verification_otps")
+        .updateMany(
+          { phone: number },
+          { $set: { createdAt: new Date(Date.now() - 31_000) } },
+        );
+    await server.register("link-contract@example.com");
+    const token = (await loginAs("link-contract@example.com")).accessToken;
+
+    const list = "/api/auth/me/identities";
+    await call("get", list, 401);
+    const identities = await call("get", list, 200, { token });
+    assert.equal(identities.length, 1);
+
+    const otp = "/api/auth/me/phone/otp";
+    const phone = "/api/auth/me/phone";
+    const number = "0914000001";
+    await call("post", otp, 401, { body: { phone: number } });
+    await call("post", otp, 400, { token, body: { phone: "bad" } });
+    await call("post", otp, 202, { token, body: { phone: number } });
+    const code = await otpFor(number);
+    await call("post", phone, 401, { body: { phone: number, code } });
+    await call("post", phone, 400, {
+      token,
+      body: { phone: number, code: "1" },
+    });
+    await call("post", phone, 401, {
+      token,
+      body: { phone: number, code: code === "000000" ? "111111" : "000000" },
+    });
+    server.users.unavailable = true;
+    try {
+      await call("post", phone, 503, { token, body: { phone: number, code } });
+    } finally {
+      server.users.unavailable = false;
+    }
+    await expire(number);
+    await call("post", otp, 202, { token, body: { phone: number } });
+    await call("post", phone, 200, {
+      token,
+      body: { phone: number, code: await otpFor(number, 2) },
+    });
+    await call("post", otp, 409, { token, body: { phone: "0914000002" } });
+    await call("post", phone, 409, {
+      token,
+      body: { phone: "0914000002", code: "123456" },
+    });
+
+    const email = "/api/auth/me/email";
+    await call("post", email, 401, {
+      body: { email: "x@example.com", password: TEST_PASSWORD },
+    });
+    await call("post", email, 400, {
+      token,
+      body: { email: "bad", password: TEST_PASSWORD },
+    });
+    await call("post", email, 409, {
+      token,
+      body: { email: "new-link@example.com", password: TEST_PASSWORD },
+    });
+
+    const phoneNumber = "0914000003";
+    await call("post", "/api/auth/phone/otp", 202, {
+      body: { phone: phoneNumber },
+    });
+    const phoneUser = await call("post", "/api/auth/phone/login", 200, {
+      body: {
+        phone: phoneNumber,
+        code: await otpFor(phoneNumber),
+        device: WEB_DEVICE,
+      },
+    });
+    const phoneToken = phoneUser.accessToken;
+    server.users.unavailable = true;
+    try {
+      await call("post", email, 503, {
+        token: phoneToken,
+        body: { email: "phone-link@example.com", password: TEST_PASSWORD },
+      });
+    } finally {
+      server.users.unavailable = false;
+    }
+    await call("post", email, 202, {
+      token: phoneToken,
+      body: { email: "phone-link@example.com", password: TEST_PASSWORD },
+    });
+  });
+
   it("429 on every rate-limited endpoint", async () => {
     const limited = await server.startRateLimited();
     const hammer = async (
@@ -661,10 +759,21 @@ describe("every documented response is real", () => {
         5,
       );
       await hammer("/api/auth/phone/otp", { phone: "0900000000" }, 5);
+      await hammer("/api/auth/me/phone/otp", { phone: "0900000000" }, 0);
       await hammer(
         "/api/auth/phone/login",
         { phone: "0900000000", code: "000000", device: WEB_DEVICE },
         10,
+      );
+      await hammer(
+        "/api/auth/me/phone",
+        { phone: "0900000000", code: "000000" },
+        0,
+      );
+      await hammer(
+        "/api/auth/me/email",
+        { email: "nobody@example.com", password: TEST_PASSWORD },
+        0,
       );
       await hammer(
         "/oauth/token",

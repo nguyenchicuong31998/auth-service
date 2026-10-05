@@ -39,13 +39,22 @@ export class MongoosePhoneVerificationOtpRepository implements PhoneVerification
     return doc ? toEntity(doc) : null;
   }
 
-  async recordFailedAttempt(id: Uuid, at: Date): Promise<number> {
+  async reserveAttempt(
+    phone: string,
+    now: Date,
+    maxAttempts: number,
+  ): Promise<PhoneVerificationOtp | null> {
     const doc = await PhoneVerificationOtpModel.findOneAndUpdate(
-      { _id: id },
-      { $inc: { attempts: 1 }, $set: { updatedAt: at } },
-      { new: true },
+      {
+        phone,
+        consumedAt: null,
+        expiresAt: { $gt: now },
+        attempts: { $lt: maxAttempts },
+      },
+      { $inc: { attempts: 1 }, $set: { updatedAt: now } },
+      { new: true, sort: { createdAt: -1 } },
     ).lean<PhoneVerificationOtpDocument>();
-    return doc?.attempts ?? Number.MAX_SAFE_INTEGER;
+    return doc ? toEntity(doc) : null;
   }
 
   async consume(id: Uuid, at: Date): Promise<boolean> {

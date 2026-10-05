@@ -4,6 +4,7 @@ import {
   type DeviceType,
 } from "../../domain/entities/user_device.js";
 import {
+  allowOnly,
   badRequest,
   nullable,
   parseEnum,
@@ -40,7 +41,6 @@ export interface LoginInput {
 export interface PhoneLoginInput {
   phone: string;
   code: string;
-  /** Used only when the phone has no account yet. */
   fullName: string | null;
   device: DeviceInput;
 }
@@ -56,7 +56,6 @@ export function parseEmail(value: unknown): string {
   return email;
 }
 
-// Same normalization as user-service: drop spaces, dots and dashes.
 export function parsePhone(value: unknown): string {
   const phone = parseString(value, "phone", 20).replace(/[\s.-]/g, "");
   if (!PHONE_RE.test(phone)) throw badRequest("phone is invalid");
@@ -85,6 +84,7 @@ export function parseNewPassword(value: unknown, field: string): string {
 
 function parseDevice(value: unknown): DeviceInput {
   const input = toObject(value, "device");
+  allowOnly(input, ["id", "deviceName", "deviceType", "fcmToken"]);
   requireFields(input, ["deviceName", "deviceType"]);
   return {
     id: nullable(input.id, (id) => parseUuid(id, "device.id")) ?? null,
@@ -99,6 +99,7 @@ function parseDevice(value: unknown): DeviceInput {
 
 export function parseRegisterInput(body: unknown): RegisterInput {
   const input = toObject(body);
+  allowOnly(input, ["fullName", "email", "password"]);
   requireFields(input, ["fullName", "email", "password"]);
   return {
     fullName: parseString(input.fullName, "fullName", 255),
@@ -109,6 +110,7 @@ export function parseRegisterInput(body: unknown): RegisterInput {
 
 export function parseLoginInput(body: unknown): LoginInput {
   const input = toObject(body);
+  allowOnly(input, ["email", "password", "device"]);
   requireFields(input, ["email", "password", "device"]);
   return {
     email: parseEmail(input.email),
@@ -117,20 +119,49 @@ export function parseLoginInput(body: unknown): LoginInput {
   };
 }
 
+function parseOtpCode(value: unknown): string {
+  const code = parseString(value, "code", 6);
+  if (!/^\d{6}$/.test(code)) throw badRequest("code must be 6 digits");
+  return code;
+}
+
 export function parsePhoneOtpRequest(body: unknown): string {
   const input = toObject(body);
+  allowOnly(input, ["phone"]);
   requireFields(input, ["phone"]);
   return parsePhone(input.phone);
 }
 
+export function parseLinkPhoneInput(body: unknown): {
+  phone: string;
+  code: string;
+} {
+  const input = toObject(body);
+  allowOnly(input, ["phone", "code"]);
+  requireFields(input, ["phone", "code"]);
+  return { phone: parsePhone(input.phone), code: parseOtpCode(input.code) };
+}
+
+export function parseLinkEmailInput(body: unknown): {
+  email: string;
+  password: string;
+} {
+  const input = toObject(body);
+  allowOnly(input, ["email", "password"]);
+  requireFields(input, ["email", "password"]);
+  return {
+    email: parseEmail(input.email),
+    password: parseNewPassword(input.password, "password"),
+  };
+}
+
 export function parsePhoneLoginInput(body: unknown): PhoneLoginInput {
   const input = toObject(body);
+  allowOnly(input, ["phone", "code", "fullName", "device"]);
   requireFields(input, ["phone", "code", "device"]);
-  const code = parseString(input.code, "code", 6);
-  if (!/^\d{6}$/.test(code)) throw badRequest("code must be 6 digits");
   return {
     phone: parsePhone(input.phone),
-    code,
+    code: parseOtpCode(input.code),
     fullName:
       nullable(input.fullName, (name) => parseString(name, "fullName", 255)) ??
       null,
@@ -140,12 +171,14 @@ export function parsePhoneLoginInput(body: unknown): PhoneLoginInput {
 
 export function parseRefreshTokenInput(body: unknown): string {
   const input = toObject(body);
+  allowOnly(input, ["refreshToken"]);
   requireFields(input, ["refreshToken"]);
   return parseString(input.refreshToken, "refreshToken", 500);
 }
 
 export function parseChangePasswordInput(body: unknown): ChangePasswordInput {
   const input = toObject(body);
+  allowOnly(input, ["currentPassword", "newPassword"]);
   requireFields(input, ["currentPassword", "newPassword"]);
   return {
     currentPassword: parsePassword(input.currentPassword, "currentPassword"),
@@ -155,12 +188,14 @@ export function parseChangePasswordInput(body: unknown): ChangePasswordInput {
 
 export function parseVerifyEmailInput(body: unknown): string {
   const input = toObject(body);
+  allowOnly(input, ["token"]);
   requireFields(input, ["token"]);
   return parseString(input.token, "token", 200);
 }
 
 export function parseResendVerificationInput(body: unknown): string {
   const input = toObject(body);
+  allowOnly(input, ["email"]);
   requireFields(input, ["email"]);
   return parseEmail(input.email);
 }

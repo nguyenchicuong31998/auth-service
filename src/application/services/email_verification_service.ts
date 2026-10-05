@@ -1,5 +1,9 @@
-import { isVerificationTokenUsable } from "../../domain/entities/email_verification_token.js";
+import {
+  isVerificationTokenUsable,
+  type EmailVerificationToken,
+} from "../../domain/entities/email_verification_token.js";
 import { isEmailAccount } from "../../domain/entities/user_identity.js";
+import { DuplicateKeyError } from "../../domain/errors/duplicate_key_error.js";
 import { UserServiceError } from "../../domain/errors/user_service_error.js";
 import type { NotificationSender } from "../../domain/ports/notification_sender.js";
 import type {
@@ -21,6 +25,9 @@ export interface EmailVerificationOptions {
 const invalidToken = () =>
   AppError.badRequest("Invalid or expired verification token");
 
+export const emailTakenError = () =>
+  AppError.conflict("This email is already used by another account");
+
 function logFailure(action: string) {
   return (error: unknown) =>
     console.error(`${action} failed:`, (error as Error).message);
@@ -37,20 +44,15 @@ export class EmailVerificationService {
 
   async sendVerification(user: DirectoryUser): Promise<void> {
     if (!user.email || user.emailVerified) return;
-    const now = new Date();
-    await this.tokens.consumeAllByUser(user.id, now);
-    const rawToken = generateToken();
-    await this.tokens.create({
-      userId: user.id,
-      tokenHash: hashToken(rawToken),
-      expiresAt: new Date(now.getTime() + this.options.ttlMs),
-    });
-    const verifyUrl = new URL(this.options.verifyUrl);
-    verifyUrl.searchParams.set("token", rawToken);
-    await this.notifications.sendEmail("email-verification", user.email, {
-      name: user.fullName,
-      verifyUrl: verifyUrl.toString(),
-    });
+    await this.issue(user, user.email, null);
+  }
+
+  async sendLinkVerification(
+    user: DirectoryUser,
+    email: string,
+    passwordHash: string,
+  ): Promise<void> {
+    await this.issue(user, email, passwordHash);
   }
 
   requestResend(email: string): void {
@@ -63,7 +65,37 @@ export class EmailVerificationService {
     if (!token || !isVerificationTokenUsable(token, now)) {
       throw invalidToken();
     }
+    return token.passwordHash
+      ? this.completeLink(token)
+      : this.completeRegistration(token);
+  }
 
+  private async issue(
+    user: DirectoryUser,
+    email: string,
+    passwordHash: string | null,
+  ): Promise<void> {
+    const now = new Date();
+    await this.tokens.consumeAllByUser(user.id, now);
+    const rawToken = generateToken();
+    await this.tokens.create({
+      userId: user.id,
+      tokenHash: hashToken(rawToken),
+      expiresAt: new Date(now.getTime() + this.options.ttlMs),
+      email: passwordHash ? email : null,
+      passwordHash,
+    });
+    const verifyUrl = new URL(this.options.verifyUrl);
+    verifyUrl.searchParams.set("token", rawToken);
+    await this.notifications.sendEmail("email-verification", email, {
+      name: user.fullName,
+      verifyUrl: verifyUrl.toString(),
+    });
+  }
+
+  private async completeRegistration(
+    token: EmailVerificationToken,
+  ): Promise<DirectoryUser> {
     const identity = (
       await this.identities.findAllByUser(token.userId, "manual")
     ).find((candidate) => isEmailAccount(candidate.providerAccountId));
@@ -72,6 +104,7 @@ export class EmailVerificationService {
     const user = await this.markVerified(
       token.userId,
       identity.providerAccountId,
+      () => AppError.conflict("The email has changed since this link was sent"),
     );
     const consumed = await this.tokens.consume(token.id, new Date());
     if (consumed && user.email) {
@@ -79,6 +112,35 @@ export class EmailVerificationService {
         .sendEmail("welcome", user.email, { name: user.fullName })
         .catch(logFailure("Sending welcome email"));
     }
+    return user;
+  }
+
+  private async completeLink(
+    token: EmailVerificationToken,
+  ): Promise<DirectoryUser> {
+    const email = token.email!;
+    const owner = await this.identities.findByProviderAccount("manual", email);
+    if (owner && owner.userId !== token.userId) throw emailTakenError();
+
+    const user = await this.markVerified(token.userId, email, (message) =>
+      message === "Email already exists"
+        ? emailTakenError()
+        : AppError.conflict("This account already has a different email"),
+    );
+    if (!owner) {
+      try {
+        await this.identities.create({
+          userId: token.userId,
+          provider: "manual",
+          providerAccountId: email,
+          password: token.passwordHash,
+        });
+      } catch (error) {
+        if (error instanceof DuplicateKeyError) throw emailTakenError();
+        throw error;
+      }
+    }
+    await this.tokens.consume(token.id, new Date());
     return user;
   }
 
@@ -103,14 +165,13 @@ export class EmailVerificationService {
   private async markVerified(
     userId: string,
     email: string,
+    conflict: (message: string) => AppError,
   ): Promise<DirectoryUser> {
     try {
       return await this.users.verifyEmail(userId, email);
     } catch (error) {
       if (error instanceof UserServiceError && error.status === 409) {
-        throw AppError.conflict(
-          "The email has changed since this link was sent",
-        );
+        throw conflict(error.message);
       }
       if (error instanceof UserServiceError && error.status === 404) {
         throw invalidToken();

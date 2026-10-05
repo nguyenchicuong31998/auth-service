@@ -100,14 +100,21 @@ export class FakeUserDirectory implements UserDirectory {
     this.guard();
     const user = this.users.get(id);
     if (!user) throw new UserServiceError(404, "User not found");
-    if (user.email !== email) {
+    if (user.email !== null && user.email !== email) {
       throw new UserServiceError(
         409,
         "Email does not match the user's current email",
       );
     }
+    if (
+      user.email === null &&
+      [...this.users.values()].some((other) => other.email === email)
+    ) {
+      throw new UserServiceError(409, "Email already exists");
+    }
     const verified: DirectoryUser = {
       ...user,
+      email,
       emailVerified: true,
       status: user.status === "pending" ? "active" : user.status,
     };
@@ -119,7 +126,7 @@ export class FakeUserDirectory implements UserDirectory {
     this.guard();
     const user = this.users.get(id);
     if (!user) throw new UserServiceError(404, "User not found");
-    if (user.phone !== phone) {
+    if (user.phone !== null && user.phone !== phone) {
       throw new UserServiceError(
         409,
         "Phone does not match the user's current phone",
@@ -127,6 +134,7 @@ export class FakeUserDirectory implements UserDirectory {
     }
     const verified: DirectoryUser = {
       ...user,
+      phone,
       phoneVerified: true,
       status: user.status === "pending" ? "active" : user.status,
     };
@@ -192,7 +200,6 @@ export class FakeSms implements SmsSender {
     this.sent.push({ to, message });
   }
 
-  /** The 6-digit OTP of the latest SMS sent to `to`. */
   otpFor(to: string): string {
     const sms = [...this.sent].reverse().find((item) => item.to === to);
     const code = sms?.message.match(/\b(\d{6})\b/)?.[1];

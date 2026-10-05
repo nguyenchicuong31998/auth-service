@@ -13,6 +13,13 @@ export function toObject(value: unknown, field = "Request body"): Input {
   return value as Input;
 }
 
+export function allowOnly(input: Input, fields: string[]): void {
+  const unknown = Object.keys(input).filter((key) => !fields.includes(key));
+  if (unknown.length > 0) {
+    throw badRequest(`Unknown field: ${unknown.join(", ")}`);
+  }
+}
+
 export function requireFields(input: Input, fields: string[]): void {
   for (const field of fields) {
     if (input[field] === undefined) throw badRequest(`${field} is required`);

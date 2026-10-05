@@ -71,7 +71,7 @@ auth-service/
 │  ├─ generate_keys.ts                    entry `npm run keys:generate`: sinh khoá RSA 2048 (không ghi đè)
 │  ├─ container.ts                        composition root: createRoutes() · createSeeder()
 │  ├─ domain/
-│  │  ├─ entities/                        1 file = 1 bảng: user_identity · user_device · session · email_verification_token · phone_verification_otp
+│  │  ├─ entities/                        1 file = 1 bảng: user_identity · user_device · session · email_verification_token · phone_verification_otp · phone_otp_event
 │  │  ├─ repositories/                    interface lưu trữ, 1 file = 1 bảng
 │  │  ├─ ports/                           password_hasher · access_token_service · user_directory · notification_sender · sms_sender
 │  │  └─ errors/                          duplicate_key_error · user_service_error
@@ -120,7 +120,14 @@ auth-service/
 | Gửi lại email | `POST /api/auth/verify-email/resend` luôn 202 (không lộ email); chạy nền; mỗi email tối đa 1 lần / phút; link cũ hết hiệu lực |
 | Xin OTP (SĐT) | `POST /api/auth/phone/otp { phone }` → luôn 202 (không lộ số đã đăng ký) → chạy nền: OTP 6 số (`crypto.randomInt`), lưu `SHA-256(phone:code)` ở `phone_verification_otps` → `SmsSender` gửi đi (hiện là `ConsoleSmsSender`: **in ra console**). Mỗi số chỉ nhận mã mới khi mã trước đã hết hạn; mã cũ mất hiệu lực |
 | Đăng nhập bằng OTP (SĐT) | `POST /api/auth/phone/login { phone, code, fullName?, device }` → kiểm tra mã + **dùng mã nguyên tử** (2 request song song chỉ 1 thành công) → tìm identity `phone_otp` theo số → **chưa có thì tạo tài khoản** (user-service `registeredFrom = phone_otp`, tên = `fullName` hoặc số điện thoại; identity không mật khẩu; `isNewUser = true`) → user-service `POST /users/{id}/verify-phone` nếu chưa xác minh (pending → active) → thiết bị, session, token như đăng nhập email |
-| Hạn & khoá OTP | Hết hạn sau `PHONE_OTP_TTL_SECONDS` (mặc định **30 giây**); MongoDB **tự xoá** OTP hết hạn nhờ TTL index trên `expiresAt` (TTL monitor chạy ~1 phút/lần, nên code vẫn tự kiểm tra `expiresAt`). Sai `PHONE_OTP_MAX_ATTEMPTS` lần (mặc định 5) → OTP bị khoá, phải xin mã mới |
+| Chặn OTP cho tài khoản có quyền | Tài khoản **có role hoặc quyền** (nhân viên, admin) **không được đăng nhập bằng OTP** → 403 `Accounts with roles or permissions must sign in with email and password`. Lý do: chiếm được SIM (SIM swap, số bị thu hồi) không được phép đồng nghĩa với chiếm quyền quản trị. |
+| Liên kết: xem | `GET /api/auth/me/identities` → các cách đăng nhập đang gắn (`email`, `phone`) |
+| Liên kết: thêm số | `POST /api/auth/me/phone/otp { phone }` → OTP → `POST /api/auth/me/phone { phone, code }` → user-service `verify-phone` (gắn số vào user nếu đang trống) → tạo identity `phone_otp` cho **cùng user**. Từ đó đăng nhập OTP bằng số này vào đúng tài khoản. Số của tài khoản khác → 409; tài khoản đã có số khác → 409 |
+| Liên kết: thêm email | `POST /api/auth/me/email { email, password }` → băm mật khẩu, lưu **tạm trong token xác minh** (`email`, `passwordHash`) → gửi link. Bấm link (`POST /api/auth/verify-email`) → user-service `verify-email` (gắn email) → tạo identity `manual` → xoá `passwordHash` khỏi token. **Email chỉ gắn sau khi xác minh** (chống gắn email của người khác). Email của tài khoản khác → 409 |
+| Tự liên kết | Không có bước "tự gộp theo thông tin trong hồ sơ". Số/email chỉ thành cách đăng nhập khi chính chủ đã xác minh trong lúc đang đăng nhập tài khoản đó, nên đăng nhập OTP bằng số đã liên kết luôn vào đúng tài khoản |
+| Hạn & khoá OTP | Hết hạn sau `PHONE_OTP_TTL_SECONDS` (mặc định **30 giây**); MongoDB **tự xoá** OTP hết hạn nhờ TTL index trên `expiresAt` (TTL monitor chạy ~1 phút/lần, nên code vẫn tự kiểm tra `expiresAt`). Mỗi lần đoán **giữ chỗ một lượt nguyên tử** (`findOneAndUpdate` với `attempts < max`) **trước khi** so mã → dù gửi song song, mỗi mã chỉ bị so tối đa `PHONE_OTP_MAX_ATTEMPTS` (5) lần, sau đó bị khoá |
+| Giới hạn theo số điện thoại | Bảng `phone_otp_events` (TTL 24 giờ) ghi mỗi lần gửi mã (`sent`) và mỗi lần nhập sai (`failed`), tính trên **mọi IP**. Mỗi số tối đa `PHONE_OTP_MAX_SENDS_PER_HOUR` (5) mã/giờ và `PHONE_OTP_MAX_SENDS_PER_DAY` (10) mã/ngày – vượt thì vẫn trả 202 nhưng không gửi (chống spam SMS, gian lận cước). Sai quá `PHONE_OTP_MAX_FAILURES_PER_DAY` (20) lần/ngày → `/phone/login` trả **429** (chống dò mã bằng nhiều IP) |
+| Nơi gửi SMS | `SMS_PROVIDER`: hiện chỉ có `console` (in mã ra log). Mặc định `console` khi `NODE_ENV` khác `production`. **Production không đặt `SMS_PROVIDER` thì không khởi động**; đặt `console` ở production thì có cảnh báo, vì ai đọc được log sẽ đăng nhập được mọi tài khoản số điện thoại |
 | Ghi nhận đăng nhập | Sau khi login thành công → user-service `POST /users/{id}/logins` (`lastLoginAt`, `lastLoginProvider`); lỗi chỉ ghi log, không chặn đăng nhập |
 
 ### 4.2 Bảo vệ chống lạm dụng
@@ -130,8 +137,8 @@ auth-service/
 | `POST /api/auth/login` | 5 lần **sai** / 15 phút cho mỗi IP + email · 30 lần sai / 15 phút cho mỗi IP (đăng nhập đúng không tính) |
 | `POST /api/auth/register` | 10 / giờ |
 | `POST /api/auth/refresh`, `/verify-email` | 100 / 15 phút (chung) |
-| `POST /api/auth/phone/otp` | 5 / 15 phút |
-| `POST /api/auth/phone/login` | 10 lần **sai** / 15 phút (kèm khoá mã sau 5 lần sai) |
+| `POST /api/auth/phone/otp` | 5 / 15 phút mỗi IP · mỗi số 5 mã/giờ, 10 mã/ngày |
+| `POST /api/auth/phone/login` | 10 lần **sai** / 15 phút mỗi IP · mỗi số 20 lần sai/ngày · mỗi mã 5 lần sai |
 | `POST /api/auth/verify-email/resend` | 5 / 15 phút |
 | `POST /oauth/token` | 10 lần **sai** / 15 phút cho mỗi IP + client_id |
 
@@ -177,7 +184,7 @@ thử lại 1s/5s/15s; field chứa password/secret/token/hash bị ẩn). `oldV
 
 | Nguồn | Status |
 |---|---|
-| Validator | 400 |
+| Validator (gồm trường lạ: `Unknown field: …`) | 400 |
 | Sai email/mật khẩu, OTP sai/hết hạn, token sai/hết hạn, session bị thu hồi | 401 (kèm `WWW-Authenticate: Bearer`) |
 | User `inactive`/`blocked`/`banned`, thiết bị bị chặn | 403 |
 | Không tìm thấy session/thiết bị (hoặc của user khác) | 404 |
@@ -204,9 +211,13 @@ thử lại 1s/5s/15s; field chứa password/secret/token/hash bị ẩn). `oldV
 | `VERIFY_EMAIL_URL` | `http://localhost:3000/verify-email` | Trang frontend nhận `?token=` |
 | `PHONE_OTP_TTL_SECONDS` | `30` | Hạn của OTP; MongoDB tự xoá OTP hết hạn |
 | `PHONE_OTP_MAX_ATTEMPTS` | `5` | Số lần nhập sai trước khi OTP bị khoá |
+| `PHONE_OTP_MAX_SENDS_PER_HOUR` / `PHONE_OTP_MAX_SENDS_PER_DAY` | `5` / `10` | Số mã tối đa gửi tới một số điện thoại |
+| `PHONE_OTP_MAX_FAILURES_PER_DAY` | `20` | Số lần sai tối đa của một số điện thoại trong 24 giờ |
+| `SMS_PROVIDER` | `console` (ngoài production) | `console` = in mã ra log. Production bắt buộc đặt rõ |
 | `EMAIL_VERIFICATION_TTL_HOURS` | `24` | |
 | `CORS_ORIGINS` | trống | Origin trình duyệt được gọi API (phân cách dấu phẩy) |
-| `TRUST_PROXY` | `false` | `true`, số proxy hoặc subnet khi chạy sau load balancer |
+| `TRUST_PROXY` | `false` | Số proxy đứng trước (ví dụ `1`) hoặc subnet của proxy (`loopback`, `10.0.0.0/8`). **Không dùng `true`**: khi đó client tự ghi `X-Forwarded-For` để giả IP và vượt mọi rate limit |
+| `LOG_REQUESTS` | `true` | Log mỗi request ra console: thời điểm, method, đường dẫn (không có query), status, thời gian xử lý, IP, người gọi (`user:<id>` / `service:<tên>`), kèm thông báo lỗi khi 4xx/5xx. `false` = tắt |
 | `RATE_LIMIT_ENABLED` | `true` | Chỉ tắt trong test |
 | `AUDIT_SERVICE_URL` | trống | Trống = tắt audit (dùng token service tự ký, scope `audit-log:write`) |
 | `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD` | – | Chỉ dùng cho `npm run seed` |
@@ -214,7 +225,8 @@ thử lại 1s/5s/15s; field chứa password/secret/token/hash bị ẩn). `oldV
 ## 7. Giới hạn hiện tại & hướng phát triển
 
 - Email: đăng nhập bằng mật khẩu. Số điện thoại: chỉ OTP (không mật khẩu). Chưa có Google, Facebook, Apple (schema đã sẵn), chưa có quên mật khẩu.
-- OTP đang **in ra console** (`ConsoleSmsSender`). Đưa lên production cần cài `SmsSender` với nhà cung cấp SMS thật (eSMS, SpeedSMS, Twilio…).
+- Mọi body của auth-service **chỉ nhận đúng các trường đã khai báo**; gửi trường lạ → 400 `Unknown field: …` (ví dụ gửi `phone` vào `/register` hay `/login`), thay vì lặng lẽ bỏ qua.
+- OTP đang **in ra console** (`ConsoleSmsSender`, `SMS_PROVIDER=console`). Đưa lên production cần cài `SmsSender` với nhà cung cấp SMS thật (eSMS, SpeedSMS, Twilio…) và thêm CAPTCHA trước `/phone/otp`.
 - Số điện thoại chỉ được chuẩn hoá bỏ khoảng trắng/`.`/`-`: `0901234567` và `+84901234567` là **hai số khác nhau**.
 - Chưa có quên mật khẩu. Rate limit lưu trong bộ nhớ (cần Redis khi chạy nhiều instance).
 - Chưa có đồng bộ khi user bị xoá ở user-service (bước 4 – API nội bộ hoặc event).

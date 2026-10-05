@@ -125,10 +125,6 @@ export class AuthService {
     return this.signIn(user, identity, input.device, client);
   }
 
-  /**
-   * Passwordless login: a valid OTP proves the caller owns the phone. An
-   * unknown phone gets an account on the spot (sign-up and login in one).
-   */
   async phoneLogin(
     input: PhoneLoginInput,
     client: ClientContext,
@@ -144,6 +140,7 @@ export class AuthService {
 
     let user = await this.users.findById(identity.userId);
     if (!user) throw AppError.unauthorized("User no longer exists");
+    if (!isNewUser) await this.assertNotPrivileged(user.id);
     if (!user.phoneVerified) {
       user = await this.markPhoneVerified(user.id, input.phone);
     }
@@ -236,7 +233,6 @@ export class AuthService {
       throw AppError.badRequest("Current password is incorrect");
     }
     const hash = await this.passwords.hash(input.newPassword);
-    // Email and phone logins share one password, so change it on both.
     for (const identity of identities) {
       await this.identities.updatePassword(identity.id, hash);
     }
@@ -289,13 +285,21 @@ export class AuthService {
       });
     } catch (error) {
       if (!(error instanceof DuplicateKeyError)) throw error;
-      // A concurrent login created the account first: use that one.
       const existing = await this.identities.findByProviderAccount(
         "phone_otp",
         input.phone,
       );
       if (!existing) throw error;
       return existing;
+    }
+  }
+
+  private async assertNotPrivileged(userId: Uuid): Promise<void> {
+    const access = await this.users.getAccess(userId);
+    if (access && access.permissions.length > 0) {
+      throw AppError.forbidden(
+        "Accounts with roles or permissions must sign in with email and password",
+      );
     }
   }
 

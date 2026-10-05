@@ -4,6 +4,8 @@ export interface EmailVerificationToken {
   id: Uuid;
   userId: Uuid;
   tokenHash: string;
+  email: string | null;
+  passwordHash: string | null;
   expiresAt: Date;
   consumedAt: Date | null;
   createdAt: Date;

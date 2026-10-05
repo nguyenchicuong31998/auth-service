@@ -42,6 +42,19 @@ function trustProxy(): boolean | number | string {
   return /^\d+$/.test(value) ? Number(value) : value;
 }
 
+const SMS_PROVIDERS = ["console"] as const;
+export type SmsProvider = (typeof SMS_PROVIDERS)[number];
+
+function smsProvider(): SmsProvider | null {
+  const value =
+    optional("SMS_PROVIDER") ??
+    (process.env.NODE_ENV === "production" ? null : "console");
+  if (value !== null && !SMS_PROVIDERS.includes(value as SmsProvider)) {
+    throw new Error(`SMS_PROVIDER must be one of: ${SMS_PROVIDERS.join(", ")}`);
+  }
+  return value as SmsProvider | null;
+}
+
 export const env = {
   port: positiveInt("PORT", 8081),
   mongodbUri: required("MONGODB_URI"),
@@ -56,10 +69,18 @@ export const env = {
   phoneOtp: {
     ttlSeconds: positiveInt("PHONE_OTP_TTL_SECONDS", 30),
     maxAttempts: positiveInt("PHONE_OTP_MAX_ATTEMPTS", 5),
+    maxSendsPerHour: positiveInt("PHONE_OTP_MAX_SENDS_PER_HOUR", 5),
+    maxSendsPerDay: positiveInt("PHONE_OTP_MAX_SENDS_PER_DAY", 10),
+    maxFailuresPerDay: positiveInt("PHONE_OTP_MAX_FAILURES_PER_DAY", 20),
+  },
+  sms: {
+    provider: smsProvider(),
+    production: process.env.NODE_ENV === "production",
   },
   http: {
     corsOrigins: list("CORS_ORIGINS"),
     trustProxy: trustProxy(),
+    logRequests: process.env.LOG_REQUESTS !== "false",
     rateLimit: process.env.RATE_LIMIT_ENABLED !== "false",
   },
   jwt: {

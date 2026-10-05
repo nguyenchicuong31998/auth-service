@@ -11,6 +11,8 @@ export interface EmailVerificationTokenDocument {
   _id: Uuid;
   userId: Uuid;
   tokenHash: string;
+  email: string | null;
+  passwordHash: string | null;
   expiresAt: Date;
   consumedAt: Date | null;
   createdAt: Date;
@@ -22,6 +24,8 @@ const emailVerificationTokenSchema = new Schema<EmailVerificationTokenDocument>(
     _id: uuidIdField,
     userId: uuidRefField,
     tokenHash: { type: String, required: true, maxlength: 255 },
+    email: { type: String, default: null, maxlength: 255 },
+    passwordHash: { type: String, default: null, maxlength: 255 },
     expiresAt: { type: Date, required: true },
     consumedAt: nullableDate,
     updatedAt: nullableDate,

@@ -27,8 +27,6 @@ const phoneVerificationOtpSchema = new Schema<PhoneVerificationOtpDocument>(
 );
 
 phoneVerificationOtpSchema.index({ phone: 1, createdAt: -1 });
-// TTL: MongoDB deletes each OTP once expiresAt has passed. The TTL monitor
-// runs about once a minute, so the code itself also checks expiresAt.
 phoneVerificationOtpSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 export const PhoneVerificationOtpModel =

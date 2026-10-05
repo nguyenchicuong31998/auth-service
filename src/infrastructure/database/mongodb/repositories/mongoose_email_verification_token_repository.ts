@@ -14,6 +14,8 @@ function toEntity(doc: EmailVerificationTokenDocument): EmailVerificationToken {
     id: doc._id,
     userId: doc.userId,
     tokenHash: doc.tokenHash,
+    email: doc.email ?? null,
+    passwordHash: doc.passwordHash ?? null,
     expiresAt: doc.expiresAt,
     consumedAt: doc.consumedAt ?? null,
     createdAt: doc.createdAt,
@@ -22,7 +24,7 @@ function toEntity(doc: EmailVerificationTokenDocument): EmailVerificationToken {
 }
 
 const consumption = (at: Date) => ({
-  $set: { consumedAt: at, updatedAt: at },
+  $set: { consumedAt: at, updatedAt: at, passwordHash: null },
 });
 
 export class MongooseEmailVerificationTokenRepository implements EmailVerificationTokenRepository {

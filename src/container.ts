@@ -1,5 +1,6 @@
 import type { KeyObject } from "node:crypto";
 import { SuperAdminSeeder } from "./application/seeders/super_admin_seeder.js";
+import { AccountLinkService } from "./application/services/account_link_service.js";
 import { AuthService } from "./application/services/auth_service.js";
 import { SessionService } from "./application/services/session_service.js";
 import { UserDeviceService } from "./application/services/user_device_service.js";
@@ -19,7 +20,9 @@ import { JoseAccessTokenService } from "./infrastructure/security/jose_access_to
 import { loadPrivateKey } from "./infrastructure/security/rsa_key_file.js";
 import { ServiceTokenProvider } from "./infrastructure/security/service_token_provider.js";
 import type { ApiRoute } from "./presentation/app.js";
+import { AccountController } from "./presentation/controllers/account_controller.js";
 import { AuthController } from "./presentation/controllers/auth_controller.js";
+import { createAccountRoutes } from "./presentation/routes/account_routes.js";
 import { JwksController } from "./presentation/controllers/jwks_controller.js";
 import { SessionController } from "./presentation/controllers/session_controller.js";
 import { UserDeviceController } from "./presentation/controllers/user_device_controller.js";
@@ -46,6 +49,7 @@ import { PhoneOtpService } from "./application/services/phone_otp_service.js";
 import type { SmsSender } from "./domain/ports/sms_sender.js";
 import { MongoosePhoneVerificationOtpRepository } from "./infrastructure/database/mongodb/repositories/mongoose_phone_verification_otp_repository.js";
 import { ConsoleSmsSender } from "./infrastructure/sms/console_sms_sender.js";
+import { MongoosePhoneOtpEventRepository } from "./infrastructure/database/mongodb/repositories/mongoose_phone_otp_event_repository.js";
 import type { AuditSink } from "./domain/ports/audit_sink.js";
 import {
   AuditClient,
@@ -103,11 +107,25 @@ function createExternalServices(): ExternalServices {
       env.notificationServiceUrl,
       createServiceTokens(signingKey),
     ),
-    smsSender: new ConsoleSmsSender(),
+    smsSender: createSmsSender(),
     auditSink: env.auditServiceUrl
       ? new AuditClient(env.auditServiceUrl, createServiceTokens(signingKey))
       : new DisabledAuditSink(),
   };
+}
+
+function createSmsSender(): SmsSender {
+  if (env.sms.provider === "console") {
+    if (env.sms.production) {
+      console.warn(
+        "WARNING: SMS_PROVIDER=console in production – OTP codes are written to the log and no SMS is sent.",
+      );
+    }
+    return new ConsoleSmsSender();
+  }
+  throw new Error(
+    'No SMS provider configured. Set SMS_PROVIDER (only "console" is available, for development).',
+  );
 }
 
 function createRepositories() {
@@ -118,6 +136,7 @@ function createRepositories() {
     oauthClients: new MongooseOAuthClientRepository(),
     verificationTokens: new MongooseEmailVerificationTokenRepository(),
     phoneOtps: new MongoosePhoneVerificationOtpRepository(),
+    phoneOtpEvents: new MongoosePhoneOtpEventRepository(),
   };
 }
 
@@ -132,6 +151,7 @@ export function createRoutes(
     oauthClients,
     verificationTokens,
     phoneOtps,
+    phoneOtpEvents,
   } = createRepositories();
   const {
     userDirectory,
@@ -158,10 +178,18 @@ export function createRoutes(
     },
   );
 
-  const phoneOtpService = new PhoneOtpService(phoneOtps, smsSender, {
-    ttlMs: env.phoneOtp.ttlSeconds * 1000,
-    maxAttempts: env.phoneOtp.maxAttempts,
-  });
+  const phoneOtpService = new PhoneOtpService(
+    phoneOtps,
+    phoneOtpEvents,
+    smsSender,
+    {
+      ttlMs: env.phoneOtp.ttlSeconds * 1000,
+      maxAttempts: env.phoneOtp.maxAttempts,
+      maxSendsPerHour: env.phoneOtp.maxSendsPerHour,
+      maxSendsPerDay: env.phoneOtp.maxSendsPerDay,
+      maxFailuresPerDay: env.phoneOtp.maxFailuresPerDay,
+    },
+  );
 
   const authService = new AuthService(
     identities,
@@ -189,11 +217,28 @@ export function createRoutes(
     accessTokens,
   );
 
+  const accountLinkService = new AccountLinkService(
+    identities,
+    userDirectory,
+    passwordHasher,
+    phoneOtpService,
+    verificationService,
+  );
+
   return [
     {
       path: "/api/auth",
       router: createAuthRoutes(
         new AuthController(authService, verificationService, phoneOtpService),
+        authenticate,
+        limits,
+        audit,
+      ),
+    },
+    {
+      path: "/api/auth/me",
+      router: createAccountRoutes(
+        new AccountController(accountLinkService),
         authenticate,
         limits,
         audit,

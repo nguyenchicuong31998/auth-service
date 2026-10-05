@@ -1,21 +1,25 @@
 import { randomInt } from "node:crypto";
-import { isOtpUsable } from "../../domain/entities/phone_verification_otp.js";
 import type { SmsSender } from "../../domain/ports/sms_sender.js";
+import type { PhoneOtpEventRepository } from "../../domain/repositories/phone_otp_event_repository.js";
 import type { PhoneVerificationOtpRepository } from "../../domain/repositories/phone_verification_otp_repository.js";
 import { AppError } from "../errors/app_error.js";
 import { hashToken, isSameHash } from "../shared/token_hash.js";
 
 const OTP_LENGTH = 6;
 const MAX_RESEND_COOLDOWN_MS = 60_000;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 
 export interface PhoneOtpOptions {
   ttlMs: number;
   maxAttempts: number;
+  maxSendsPerHour: number;
+  maxSendsPerDay: number;
+  maxFailuresPerDay: number;
 }
 
 const invalidOtp = () => AppError.unauthorized("Invalid or expired OTP");
 
-// Salted with the phone so equal codes never share a hash.
 const hashOtp = (phone: string, code: string) => hashToken(`${phone}:${code}`);
 
 const generateOtp = () =>
@@ -28,57 +32,77 @@ function logFailure(action: string) {
     console.error(`${action} failed:`, (error as Error).message);
 }
 
-/** One-time codes sent by SMS; proving the code proves owning the phone. */
 export class PhoneOtpService {
   constructor(
     private readonly otps: PhoneVerificationOtpRepository,
+    private readonly events: PhoneOtpEventRepository,
     private readonly sms: SmsSender,
     private readonly options: PhoneOtpOptions,
   ) {}
 
-  /**
-   * Sends a new code in the background. Works for unknown phones too, so
-   * the response never reveals whether a phone is registered.
-   */
   requestOtp(phone: string): void {
     this.send(phone).catch(logFailure("Sending phone OTP"));
   }
 
-  /** Checks the code and uses it up; throws 401 when it is not valid. */
   async consumeCode(phone: string, code: string): Promise<void> {
     const now = new Date();
-    const otp = await this.otps.findLatestByPhone(phone);
-    if (!otp || !isOtpUsable(otp, now, this.options.maxAttempts)) {
-      throw invalidOtp();
+    const failures = await this.events.countSince(
+      phone,
+      "failed",
+      new Date(now.getTime() - DAY_MS),
+    );
+    if (failures >= this.options.maxFailuresPerDay) {
+      throw AppError.tooManyRequests(
+        "Too many failed OTP attempts for this phone, try again later",
+      );
     }
+
+    const otp = await this.otps.reserveAttempt(
+      phone,
+      now,
+      this.options.maxAttempts,
+    );
+    if (!otp) throw invalidOtp();
+
     if (!isSameHash(hashOtp(phone, code), otp.codeHash)) {
-      const attempts = await this.otps.recordFailedAttempt(otp.id, now);
-      if (attempts >= this.options.maxAttempts) {
+      await this.events.record(phone, "failed");
+      if (otp.attempts >= this.options.maxAttempts) {
         throw AppError.unauthorized(
           "Too many wrong OTP attempts, request a new code",
         );
       }
       throw invalidOtp();
     }
-    // Atomic: of two concurrent logins with the same code only one wins.
     if (!(await this.otps.consume(otp.id, now))) throw invalidOtp();
   }
 
   private async send(phone: string): Promise<void> {
-    // A short-lived code must be resendable as soon as it expires.
+    const now = Date.now();
     const cooldownMs = Math.min(MAX_RESEND_COOLDOWN_MS, this.options.ttlMs);
     const latest = await this.otps.findLatestByPhone(phone);
-    if (latest && Date.now() - latest.createdAt.getTime() < cooldownMs) {
+    if (latest && now - latest.createdAt.getTime() < cooldownMs) return;
+
+    const [lastHour, lastDay] = await Promise.all([
+      this.events.countSince(phone, "sent", new Date(now - HOUR_MS)),
+      this.events.countSince(phone, "sent", new Date(now - DAY_MS)),
+    ]);
+    if (
+      lastHour >= this.options.maxSendsPerHour ||
+      lastDay >= this.options.maxSendsPerDay
+    ) {
+      console.warn(`Phone OTP limit reached for ${maskPhone(phone)}`);
       return;
     }
-    const now = new Date();
-    await this.otps.consumeAllByPhone(phone, now);
+
+    const at = new Date(now);
+    await this.otps.consumeAllByPhone(phone, at);
     const code = generateOtp();
     await this.otps.create({
       phone,
       codeHash: hashOtp(phone, code),
-      expiresAt: new Date(now.getTime() + this.options.ttlMs),
+      expiresAt: new Date(now + this.options.ttlMs),
     });
+    await this.events.record(phone, "sent");
     const seconds = Math.round(this.options.ttlMs / 1000);
     await this.sms.sendSms(
       phone,
@@ -86,3 +110,6 @@ export class PhoneOtpService {
     );
   }
 }
+
+const maskPhone = (phone: string) =>
+  `${"*".repeat(phone.length - 3)}${phone.slice(-3)}`;

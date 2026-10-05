@@ -22,7 +22,29 @@ const otpsCollection = () =>
 const identitiesCollection = () =>
   server.mongoose.connection.collection("user_identities");
 
-/** Waits for the background SMS and returns its code. */
+const eventsCollection = () =>
+  server.mongoose.connection.collection("phone_otp_events");
+
+async function seedEvents(
+  phone: string,
+  type: "sent" | "failed",
+  count: number,
+  minutesAgo = 1,
+) {
+  const createdAt = new Date(Date.now() - minutesAgo * 60_000);
+  await eventsCollection().insertMany(
+    Array.from({ length: count }, () => ({
+      _id: crypto.randomUUID() as never,
+      phone,
+      type,
+      createdAt,
+    })),
+  );
+}
+
+const smsCount = (phone: string) =>
+  server.sms.sent.filter((sms) => sms.to === phone).length;
+
 async function waitForOtp(phone: string, count = 1): Promise<string> {
   for (let i = 0; i < 100; i += 1) {
     if (server.sms.sent.filter((sms) => sms.to === phone).length >= count) {
@@ -226,6 +248,29 @@ describe("POST /api/auth/phone/login", () => {
     assert.equal(right.status, 401, "the locked code no longer works");
   });
 
+  it("checks at most five guesses even when they arrive in parallel", async () => {
+    const phone = nextPhone();
+    const code = await requestOtp(phone);
+    const guesses = Array.from({ length: 40 }, (_, i) =>
+      String((Number(code) + 1 + i) % 1_000_000).padStart(6, "0"),
+    );
+    const results = await Promise.all(
+      guesses.map((guess) => phoneLogin({ phone, code: guess })),
+    );
+    assert.ok(results.every((res) => res.status === 401));
+
+    const otp = await otpsCollection().findOne({ phone });
+    assert.equal(otp?.attempts, 5, "only five guesses were compared");
+    const failed = await eventsCollection().countDocuments({
+      phone,
+      type: "failed",
+    });
+    assert.equal(failed, 5);
+
+    const right = await phoneLogin({ phone, code });
+    assert.equal(right.status, 401, "the real code is locked as well");
+  });
+
   it("rejects an expired code, a code for another phone and no code at all", async () => {
     const phone = nextPhone();
     const code = await requestOtp(phone);
@@ -293,6 +338,54 @@ describe("POST /api/auth/phone/login", () => {
   });
 });
 
+describe("per-phone limits", () => {
+  it("records every SMS and keeps the history for 24 hours", async () => {
+    const phone = nextPhone();
+    await requestOtp(phone);
+    assert.equal(
+      await eventsCollection().countDocuments({ phone, type: "sent" }),
+      1,
+    );
+    const indexes = await eventsCollection().indexes();
+    const ttl = indexes.find((index) => index.key.createdAt === 1);
+    assert.equal(ttl?.expireAfterSeconds, 24 * 60 * 60);
+  });
+
+  it("stops texting a phone after 5 codes in an hour", async () => {
+    const phone = nextPhone();
+    await seedEvents(phone, "sent", 5, 30);
+    const res = await post("/api/auth/phone/otp", { phone });
+    assert.equal(res.status, 202, "the answer does not change");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(smsCount(phone), 0);
+  });
+
+  it("stops texting a phone after 10 codes in a day", async () => {
+    const phone = nextPhone();
+    await seedEvents(phone, "sent", 10, 6 * 60);
+    await post("/api/auth/phone/otp", { phone });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(smsCount(phone), 0);
+
+    const older = nextPhone();
+    await seedEvents(older, "sent", 10, 25 * 60);
+    await requestOtp(older);
+    assert.equal(smsCount(older), 1, "events older than a day do not count");
+  });
+
+  it("blocks OTP logins for a phone after 20 wrong codes in a day", async () => {
+    const phone = nextPhone();
+    const code = await requestOtp(phone);
+    await seedEvents(phone, "failed", 20, 60);
+    const res = await phoneLogin({ phone, code });
+    assert.equal(res.status, 429);
+    assert.equal(
+      res.body.message,
+      "Too many failed OTP attempts for this phone, try again later",
+    );
+  });
+});
+
 describe("phone accounts and passwords", () => {
   it("cannot log in with a password or change one", async () => {
     const { phone, body } = await signedInByPhone();
@@ -302,7 +395,7 @@ describe("phone accounts and passwords", () => {
       device: WEB_DEVICE,
     });
     assert.equal(withPassword.status, 400);
-    assert.equal(withPassword.body.message, "email is required");
+    assert.equal(withPassword.body.message, "Unknown field: phone");
 
     const change = await server.api("PUT", "/api/auth/password", {
       token: body.accessToken,
@@ -315,13 +408,95 @@ describe("phone accounts and passwords", () => {
     );
   });
 
-  it("register only takes an email and a password", async () => {
-    const res = await post("/api/auth/register", {
-      fullName: "No Email",
+  it("register rejects a phone instead of silently ignoring it", async () => {
+    const withBoth = await post("/api/auth/register", {
+      fullName: "Both",
+      email: "both-rejected@example.com",
       phone: "0901234567",
       password: TEST_PASSWORD,
     });
-    assert.equal(res.status, 400);
-    assert.equal(res.body.message, "email is required");
+    assert.equal(withBoth.status, 400);
+    assert.equal(withBoth.body.message, "Unknown field: phone");
+    assert.equal(
+      await identitiesCollection().countDocuments({
+        providerAccountId: "both-rejected@example.com",
+      }),
+      0,
+      "no account was created",
+    );
+  });
+});
+
+describe("privileged accounts", () => {
+  it("cannot sign in with an OTP once they hold any permission", async () => {
+    const { phone, body } = await signedInByPhone();
+    server.users.grant(body.user.id, ["lead:read"]);
+    await otpsCollection().updateMany(
+      { phone },
+      { $set: { createdAt: new Date(Date.now() - 31_000) } },
+    );
+    const code = await requestOtp(phone, 2);
+    const res = await phoneLogin({ phone, code });
+    assert.equal(res.status, 403);
+    assert.equal(
+      res.body.message,
+      "Accounts with roles or permissions must sign in with email and password",
+    );
+
+    server.users.grant(body.user.id, []);
+    await otpsCollection().updateMany(
+      { phone },
+      { $set: { createdAt: new Date(Date.now() - 31_000) } },
+    );
+    const again = await phoneLogin({ phone, code: await requestOtp(phone, 3) });
+    assert.equal(again.status, 200, "without access the phone works again");
+  });
+});
+
+describe("unknown fields", () => {
+  it("are rejected on every auth body", async () => {
+    const cases: [string, Json][] = [
+      [
+        "/api/auth/register",
+        {
+          fullName: "A",
+          email: "a@b.co",
+          password: TEST_PASSWORD,
+          role: "ADMIN",
+        },
+      ],
+      [
+        "/api/auth/login",
+        { email: "a@b.co", password: "x", device: WEB_DEVICE, remember: true },
+      ],
+      ["/api/auth/phone/otp", { phone: "0901234567", channel: "voice" }],
+      [
+        "/api/auth/phone/login",
+        {
+          phone: "0901234567",
+          code: "123456",
+          device: WEB_DEVICE,
+          email: "a@b.co",
+        },
+      ],
+      ["/api/auth/refresh", { refreshToken: "x", userId: "y" }],
+      ["/api/auth/verify-email", { token: "x", email: "a@b.co" }],
+      [
+        "/api/auth/verify-email/resend",
+        { email: "a@b.co", phone: "0901234567" },
+      ],
+    ];
+    for (const [path, body] of cases) {
+      const res = await post(path, body);
+      assert.equal(res.status, 400, path);
+      assert.match(res.body.message, /^Unknown field: /, path);
+    }
+    const device = await post("/api/auth/login", {
+      email: "a@b.co",
+      password: "x",
+      device: { ...WEB_DEVICE, os: "Windows" },
+    });
+    assert.equal(device.status, 400);
+    assert.equal(device.body.message, "Unknown field: os");
   });
 });

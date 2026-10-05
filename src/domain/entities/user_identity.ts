@@ -9,7 +9,6 @@ export const AUTH_PROVIDERS = [
 ] as const;
 export type AuthProvider = (typeof AUTH_PROVIDERS)[number];
 
-// A "manual" (password) identity is keyed by either an email or a phone number.
 export const isEmailAccount = (providerAccountId: string) =>
   providerAccountId.includes("@");
 
